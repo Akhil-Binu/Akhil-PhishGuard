@@ -1,0 +1,16 @@
+{
+  "name": "phishguard-server",
+  "version": "1.0.0",
+  "description": "Backend API for PhishGuard URL & Email Analyzer",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "@google/generative-ai": "^0.21.0"
+  }
+}
