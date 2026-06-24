@@ -4,12 +4,12 @@ import { promisify } from 'util';
 const resolveTxtAsync = promisify(dns.resolveTxt);
 
 const POPULAR_DOMAINS = [
-  'google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
+  'google.com', 'google.co.in', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
   'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
   'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
   'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
   'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 'chase.com',
-  'fiverr.com'
+  'fiverr.com', 'flipkart.com', 'wikipedia.org', 'reddit.com', 'stackoverflow.com'
 ];
 
 const HIGH_RISK_TLDS = new Set([

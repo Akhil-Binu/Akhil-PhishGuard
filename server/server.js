@@ -223,10 +223,20 @@ app.post('/api/analyze-url', async (req, res) => {
       }
     });
 
-    if (redirectChain.length > 2) {
+    // Count domain-changing redirects
+    let domainDriftRedirects = 0;
+    for (let i = 0; i < redirectChain.length - 1; i++) {
+      const fromDom = extractDomainInfo(redirectChain[i].url).domain;
+      const toDom = extractDomainInfo(redirectChain[i + 1].url).domain;
+      if (fromDom && toDom && fromDom !== toDom) {
+        domainDriftRedirects++;
+      }
+    }
+
+    if (redirectChain.length > 3 || (domainDriftRedirects > 0 && redirectChain.length > 2)) {
       indicators.push({
         title: 'Multiple Redirection Hops',
-        description: `The URL redirected ${redirectChain.length - 1} times. Multiple redirect chains are frequently used to mask destination servers.`,
+        description: `The URL redirected ${redirectChain.length - 1} times. Phishing sites often chain multiple redirects across different domains to evade security scanners.`,
         category: 'redirects',
         severity: 'medium',
         weight: 20
@@ -245,10 +255,10 @@ app.post('/api/analyze-url', async (req, res) => {
       score += 25;
     }
 
-    if (domainInfo.protocol === 'http:') {
+    if (finalDomainInfo.protocol === 'http:') {
       indicators.push({
         title: 'Unencrypted Connection (HTTP)',
-        description: 'This site does not use HTTPS. Legitimate login or payment pages always use SSL/TLS encryption.',
+        description: 'The landing page uses unencrypted HTTP instead of HTTPS. Legacy channels are insecure.',
         category: 'security',
         severity: 'medium',
         weight: 15
@@ -285,6 +295,21 @@ app.post('/api/analyze-url', async (req, res) => {
       if (aiAnalysis.ai_risk_score > 60 && score < 50) {
         score += 20;
       }
+    }
+
+    // Whitelist check: prevent false positives on massive, globally reputable domains
+    const POPULAR_DOMAINS_SET = new Set([
+      'google.com', 'google.co.in', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
+      'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
+      'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
+      'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
+      'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 
+      'fiverr.com', 'flipkart.com', 'wikipedia.org', 'reddit.com', 'stackoverflow.com'
+    ]);
+
+    if (POPULAR_DOMAINS_SET.has(finalDomainInfo.domain)) {
+      score = 0;
+      indicators.length = 0; // Clear false heuristic indicators
     }
 
     score = Math.min(score, 100);
