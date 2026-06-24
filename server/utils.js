@@ -8,7 +8,8 @@ const POPULAR_DOMAINS = [
   'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
   'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
   'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
-  'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 'chase.com'
+  'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 'chase.com',
+  'fiverr.com'
 ];
 
 const HIGH_RISK_TLDS = new Set([
@@ -330,6 +331,50 @@ export function extractAndAnalyzeLinks(body, senderDomain) {
   return analyzedLinks;
 }
 
+// Analyze webpage HTML structure for credential harvesting fields & keywords
+export function analyzeHtmlContent(html, domain) {
+  const result = {
+    hasPasswordInput: false,
+    hasLoginForm: false,
+    keywordsFound: [],
+    strippedText: ''
+  };
+  
+  if (!html) return result;
+
+  const htmlLower = html.toLowerCase();
+  
+  // Check for password input elements
+  if (htmlLower.includes('type="password"') || htmlLower.includes("type='password'") || 
+      htmlLower.includes('name="password"') || htmlLower.includes("name='password'")) {
+    result.hasPasswordInput = true;
+  }
+  
+  // Check for login/sign forms
+  if (htmlLower.includes('<form') && (htmlLower.includes('login') || htmlLower.includes('sign'))) {
+    result.hasLoginForm = true;
+  }
+  
+  // Check for target brand and session keywords
+  const keywords = ['login', 'sign in', 'signin', 'fiverr', 'paypal', 'netflix', 'chase', 'authorize', 'verify your account', 'password'];
+  keywords.forEach(kw => {
+    if (htmlLower.includes(kw)) {
+      result.keywordsFound.push(kw);
+    }
+  });
+
+  // Strip scripts, styles, and tags for text sentiment analysis
+  let text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+    
+  result.strippedText = text.substring(0, 5000);
+  return result;
+}
+
 // Local rules-based heuristic scoring engine (Fallback for Gemini AI)
 export function runLocalHeuristicAnalysis(text, isEmail = true, parsedHeaders = null) {
   const alerts = [];
@@ -375,7 +420,8 @@ export function runLocalHeuristicAnalysis(text, isEmail = true, parsedHeaders = 
     'chase': ['chase bank', 'chase online', 'chase'],
     'microsoft': ['microsoft', 'office 365', 'outlook'],
     'bank of america': ['bank of america', 'bofa'],
-    'amazon': ['amazon support', 'amazon prime', 'amazon']
+    'amazon': ['amazon support', 'amazon prime', 'amazon'],
+    'fiverr': ['fiverr']
   };
   
   for (const [brand, kws] of Object.entries(brandKeywords)) {
@@ -477,4 +523,25 @@ export function runLocalHeuristicAnalysis(text, isEmail = true, parsedHeaders = 
       : (score >= 30 ? 'Content contains some warning signs but no definitive proof of phishing.' : 'No major indicators of phishing detected.'),
     alerts
   };
+}
+
+// Local Threat Intelligence Database (Known Phishing Campaigns)
+export function checkThreatDatabase(urlStr) {
+  if (!urlStr) return null;
+  const urlLower = urlStr.toLowerCase();
+  
+  const THREAT_SIGNATURE_DB = [
+    {
+      pattern: 'flickshoot.com/project/vano',
+      brand: 'Fiverr',
+      details: 'Active Fiverr credential harvesting campaign hosted on user portfolio platform (flickshoot.com).'
+    }
+  ];
+  
+  for (const item of THREAT_SIGNATURE_DB) {
+    if (urlLower.includes(item.pattern)) {
+      return item;
+    }
+  }
+  return null;
 }

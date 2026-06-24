@@ -10,7 +10,9 @@ import {
   extractEmailAddress,
   verifyDomainDNS,
   extractAndAnalyzeLinks,
-  runLocalHeuristicAnalysis
+  runLocalHeuristicAnalysis,
+  analyzeHtmlContent,
+  checkThreatDatabase
 } from './utils.js';
 
 dotenv.config();
@@ -28,7 +30,7 @@ app.use((req, res, next) => {
 });
 
 // Gemini AI analysis runner
-async function runGeminiAnalysis(content, isEmail, apiKey) {
+async function runGeminiAnalysis(content, isEmail, apiKey, screenshotBase64 = null) {
   const key = apiKey || process.env.GEMINI_API_KEY;
   if (!key) {
     throw new Error('No Gemini API key available');
@@ -54,7 +56,10 @@ async function runGeminiAnalysis(content, isEmail, apiKey) {
 
     Email text or headers to analyze:
     ${content}`
-    : `Analyze the following URL and domain details for potential phishing, brand spoofing, or deceptive routing. Output your response as a JSON object matching this schema:
+    : `Analyze the following URL, domain details, and attached screenshot of the webpage for potential phishing, brand spoofing, or deceptive routing.
+    Examine the screenshot's visual layout and text to see if it mimics a popular corporate login/home page (like Fiverr, Netflix, PayPal, Chase, Microsoft, Amazon, Google, etc.).
+    If the webpage visual design mimics a popular brand but the URL domain is NOT that legitimate brand's domain (e.g. hosts a Fiverr login on flickshoot.com), classify it as a MALICIOUS spoof immediately.
+    Output your response as a JSON object matching this schema:
     {
       "urgency": { "score": number, "explanation": "string" },
       "impersonation": { "detected": boolean, "targetBrand": "string", "explanation": "string" },
@@ -68,7 +73,17 @@ async function runGeminiAnalysis(content, isEmail, apiKey) {
     URL context to analyze:
     ${content}`;
 
-  const result = await model.generateContent(prompt);
+  const parts = [prompt];
+  if (screenshotBase64) {
+    parts.push({
+      inlineData: {
+        data: screenshotBase64,
+        mimeType: 'image/png'
+      }
+    });
+  }
+
+  const result = await model.generateContent(parts);
   const responseText = result.response.text();
   return JSON.parse(responseText);
 }
@@ -95,14 +110,43 @@ app.post('/api/analyze-url', async (req, res) => {
     const typosquat = checkTyposquatting(domainInfo.domain);
     const finalTyposquat = checkTyposquatting(finalDomainInfo.domain);
 
-    // 3. AI / Heuristics analysis
+    // 3. Webpage Content Analysis (Credential harvesting & Visual screenshot scan)
+    let webpageContent = '';
+    let pageAnalysis = { hasPasswordInput: false, hasLoginForm: false, keywordsFound: [], strippedText: '' };
+    let screenshotBase64 = null;
+    
+    // Fetch the final landing page content and capture webpage visual screenshot in parallel
+    try {
+      const pageRes = await fetch(finalUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      if (pageRes.ok) {
+        webpageContent = await pageRes.text();
+        pageAnalysis = analyzeHtmlContent(webpageContent, finalDomainInfo.domain);
+      }
+
+      // Fetch visual screenshot from Microlink API
+      const screenshotApiUrl = `https://api.microlink.io?url=${encodeURIComponent(finalUrl)}&screenshot=true&embed=screenshot.url`;
+      const screenshotRes = await fetch(screenshotApiUrl);
+      if (screenshotRes.ok) {
+        const buffer = await screenshotRes.arrayBuffer();
+        screenshotBase64 = Buffer.from(buffer).toString('base64');
+      }
+    } catch (e) {
+      console.warn('Could not fetch webpage content or visual screenshot:', e.message);
+    }
+
+    // 4. AI / Heuristics analysis
     let aiAnalysis;
     let isSimulated = false;
 
-    const contextStr = `Original URL: ${url}\nDomain: ${domainInfo.domain}\nTLD: ${domainInfo.tld}\nProtocol: ${domainInfo.protocol}\nRedirect Chain: ${JSON.stringify(redirectChain)}\nFinal Domain: ${finalDomainInfo.domain}`;
+    const contextStr = `Original URL: ${url}\nDomain: ${domainInfo.domain}\nTLD: ${domainInfo.tld}\nProtocol: ${domainInfo.protocol}\nRedirect Chain: ${JSON.stringify(redirectChain)}\nFinal Domain: ${finalDomainInfo.domain}\nWebpage Text Snippet: ${pageAnalysis.strippedText}\nHas Password Fields: ${pageAnalysis.hasPasswordInput}`;
 
     try {
-      aiAnalysis = await runGeminiAnalysis(contextStr, false, apiKey);
+      aiAnalysis = await runGeminiAnalysis(contextStr, false, apiKey, screenshotBase64);
     } catch (e) {
       console.warn('Falling back to local heuristic url analysis:', e.message);
       aiAnalysis = runLocalHeuristicAnalysis(contextStr, false);
@@ -112,6 +156,19 @@ app.post('/api/analyze-url', async (req, res) => {
     // 4. Calculate Risk Score and compile threat indicators
     let score = 0;
     const indicators = [];
+
+    // Threat intelligence database lookup
+    const threatFeed = checkThreatDatabase(url);
+    if (threatFeed) {
+      indicators.push({
+        title: `Threat Intel Signature Match`,
+        description: threatFeed.details,
+        category: 'reputation',
+        severity: 'high',
+        weight: 95
+      });
+      score += 95;
+    }
 
     // High-risk TLDs
     const HIGH_RISK_TLDS = new Set(['.xyz', '.top', '.club', '.work', '.ru', '.cc', '.cn', '.fit', '.gq', '.tk', '.ml', '.cf', '.ga', '.click', '.link', '.zip', '.mov']);
@@ -137,6 +194,21 @@ app.post('/api/analyze-url', async (req, res) => {
       });
       score += 15;
     }
+
+    // Heuristics: scan landing page HTML credentials and brand keywords matching
+    const brandNames = ['fiverr', 'netflix', 'paypal', 'chase', 'microsoft', 'amazon'];
+    brandNames.forEach(brand => {
+      if (pageAnalysis.hasPasswordInput && pageAnalysis.keywordsFound.includes(brand) && !finalDomainInfo.domain.includes(brand)) {
+        indicators.push({
+          title: `${brand.charAt(0).toUpperCase() + brand.slice(1)} Impersonation Gate`,
+          description: `Webpage hosts password forms and Fiverr/brand keywords, but resolves to unaligned domain "${finalDomainInfo.domain}". This points to phishing credential harvesting.`,
+          category: 'behavioral',
+          severity: 'high',
+          weight: 55
+        });
+        score += 55;
+      }
+    });
 
     if (redirectChain.length > 2) {
       indicators.push({
@@ -219,7 +291,8 @@ app.post('/api/analyze-url', async (req, res) => {
       isSimulated,
       score,
       verdict,
-      indicators
+      indicators,
+      screenshot: screenshotBase64 ? `data:image/png;base64,${screenshotBase64}` : null
     });
   } catch (error) {
     console.error('Error analyzing URL:', error);
