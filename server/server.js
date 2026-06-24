@@ -12,7 +12,8 @@ import {
   extractAndAnalyzeLinks,
   runLocalHeuristicAnalysis,
   analyzeHtmlContent,
-  checkThreatDatabase
+  checkThreatDatabase,
+  isWhitelistedDomain
 } from './utils.js';
 
 dotenv.config();
@@ -21,7 +22,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 // Logger middleware
 app.use((req, res, next) => {
@@ -29,52 +30,72 @@ app.use((req, res, next) => {
   next();
 });
 
-// Gemini AI analysis runner
+// ===== Gemini AI Analysis =====
 async function runGeminiAnalysis(content, isEmail, apiKey, screenshotBase64 = null) {
   const key = apiKey || process.env.GEMINI_API_KEY;
-  if (!key) {
-    throw new Error('No Gemini API key available');
+  if (!key || key.trim() === '') {
+    throw new Error('No Gemini API key provided');
   }
 
-  const genAI = new GoogleGenerativeAI(key);
+  const genAI = new GoogleGenerativeAI(key.trim());
+  
+  // Use gemini-2.0-flash for both text-only and multimodal vision
+  const modelName = 'gemini-2.0-flash';
   const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash',
-    generationConfig: { responseMimeType: 'application/json' }
+    model: modelName,
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.1,
+    }
   });
 
-  const prompt = isEmail
-    ? `Analyze the following email for phishing indicators. Break down the urgency (score 0-10, where 10 is extremely urgent/threatening), brand impersonation (is it claiming to be Netflix, Paypal, Chase, etc. but has indicators of forgery?), psychological lures (e.g. fear, greed, urgency, authority, trust), and extract suspicious phrases. Output your response as a JSON object matching this schema:
-    {
-      "urgency": { "score": number, "explanation": "string" },
-      "impersonation": { "detected": boolean, "targetBrand": "string", "explanation": "string" },
-      "lures": { "types": ["string"], "explanation": "string" },
-      "suspicious_phrases": [ { "phrase": "string", "category": "string" } ],
-      "overall_verdict": "SAFE" | "SUSPICIOUS" | "MALICIOUS",
-      "ai_risk_score": number (0-100),
-      "summary": "string"
-    }
+  const JSON_SCHEMA = `{
+  "urgency": { "score": <number 0-10>, "explanation": "<string>" },
+  "impersonation": { "detected": <boolean>, "targetBrand": "<string or None>", "explanation": "<string>" },
+  "lures": { "types": ["<string>"], "explanation": "<string>" },
+  "suspicious_phrases": [{ "phrase": "<string>", "category": "<string>" }],
+  "overall_verdict": "<SAFE|SUSPICIOUS|MALICIOUS>",
+  "ai_risk_score": <number 0-100>,
+  "summary": "<string>"
+}`;
 
-    Email text or headers to analyze:
-    ${content}`
-    : `Analyze the following URL, domain details, and attached screenshot of the webpage for potential phishing, brand spoofing, or deceptive routing.
-    Examine the screenshot's visual layout and text to see if it mimics a popular corporate login/home page (like Fiverr, Netflix, PayPal, Chase, Microsoft, Amazon, Google, etc.).
-    If the webpage visual design mimics a popular brand but the URL domain is NOT that legitimate brand's domain (e.g. hosts a Fiverr login on flickshoot.com), classify it as a MALICIOUS spoof immediately.
-    Output your response as a JSON object matching this schema:
-    {
-      "urgency": { "score": number, "explanation": "string" },
-      "impersonation": { "detected": boolean, "targetBrand": "string", "explanation": "string" },
-      "lures": { "types": ["string"], "explanation": "string" },
-      "suspicious_phrases": [ { "phrase": "string", "category": "string" } ],
-      "overall_verdict": "SAFE" | "SUSPICIOUS" | "MALICIOUS",
-      "ai_risk_score": number (0-100),
-      "summary": "string"
-    }
+  let prompt;
+  if (isEmail) {
+    prompt = `You are a cybersecurity expert specializing in email phishing detection. Analyze the following email content for phishing indicators.
 
-    URL context to analyze:
-    ${content}`;
+Examine:
+1. Sender address alignment with claimed brand
+2. Urgency/fear/pressure tactics (score 0-10 where 10 = extreme)
+3. Brand impersonation (does it claim to be Netflix, PayPal, Amazon, Chase, etc. but shows forgery signs?)
+4. Psychological lures (fear, greed, urgency, authority, scarcity)
+5. Suspicious links or requests for credentials
 
-  const parts = [prompt];
-  if (screenshotBase64) {
+Output ONLY a JSON object matching this exact schema:
+${JSON_SCHEMA}
+
+Email content to analyze:
+${content}`;
+  } else {
+    prompt = `You are a cybersecurity expert specializing in URL and phishing website detection. Analyze the following URL and webpage information for phishing indicators.
+
+${screenshotBase64 ? `A screenshot of the webpage has been attached. IMPORTANT: If the screenshot visually shows a login page or design that mimics a well-known brand (like Fiverr, Netflix, PayPal, Chase, Microsoft, Amazon, Google, etc.) but the domain in the URL is NOT that brand's official domain, classify this as MALICIOUS impersonation immediately with ai_risk_score >= 85.` : ''}
+
+Key checks to perform:
+1. Does the URL domain match any claimed brand identity?
+2. Does the page content suggest credential harvesting?
+3. Are there redirect chains obscuring the true destination?
+4. What is the overall phishing risk?
+
+Output ONLY a JSON object matching this exact schema:
+${JSON_SCHEMA}
+
+URL context to analyze:
+${content}`;
+  }
+
+  const parts = [{ text: prompt }];
+  
+  if (screenshotBase64 && screenshotBase64.length > 100) {
     parts.push({
       inlineData: {
         data: screenshotBase64,
@@ -85,10 +106,80 @@ async function runGeminiAnalysis(content, isEmail, apiKey, screenshotBase64 = nu
 
   const result = await model.generateContent(parts);
   const responseText = result.response.text();
-  return JSON.parse(responseText);
+  
+  // Parse JSON - handle cases where AI wraps in markdown code blocks
+  let parsed;
+  try {
+    parsed = JSON.parse(responseText);
+  } catch {
+    // Try extracting JSON from markdown code block
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+    if (jsonMatch) {
+      parsed = JSON.parse(jsonMatch[1]);
+    } else {
+      // Try finding raw JSON object
+      const objMatch = responseText.match(/\{[\s\S]+\}/);
+      if (objMatch) {
+        parsed = JSON.parse(objMatch[0]);
+      } else {
+        throw new Error('Could not parse Gemini JSON response');
+      }
+    }
+  }
+  
+  return parsed;
 }
 
-// Route: Analyze URL
+// ===== Capture webpage screenshot via Microlink API (returns URL, then fetch image) =====
+async function captureScreenshot(pageUrl) {
+  try {
+    // Microlink API returns JSON with screenshot URL
+    const apiUrl = `https://api.microlink.io?url=${encodeURIComponent(pageUrl)}&screenshot=true&meta=false&timeout=20000`;
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    const apiRes = await fetch(apiUrl, {
+      signal: controller.signal,
+      headers: { 'x-api-key': process.env.MICROLINK_API_KEY || '' }
+    });
+    clearTimeout(timeoutId);
+    
+    if (!apiRes.ok) {
+      console.warn('Microlink API responded with:', apiRes.status);
+      return null;
+    }
+    
+    const apiJson = await apiRes.json();
+    
+    // Microlink returns { data: { screenshot: { url: '...', width, height } } }
+    const screenshotUrl = apiJson?.data?.screenshot?.url;
+    if (!screenshotUrl) {
+      console.warn('No screenshot URL in Microlink response:', JSON.stringify(apiJson).substring(0, 200));
+      return null;
+    }
+    
+    // Now fetch the actual image bytes from that URL
+    const imgController = new AbortController();
+    const imgTimeout = setTimeout(() => imgController.abort(), 15000);
+    
+    const imgRes = await fetch(screenshotUrl, { signal: imgController.signal });
+    clearTimeout(imgTimeout);
+    
+    if (!imgRes.ok) {
+      console.warn('Could not fetch screenshot image from URL:', screenshotUrl);
+      return null;
+    }
+    
+    const buffer = await imgRes.arrayBuffer();
+    return Buffer.from(buffer).toString('base64');
+  } catch (err) {
+    console.warn('Screenshot capture failed:', err.message);
+    return null;
+  }
+}
+
+// ===== Route: Analyze URL =====
 app.post('/api/analyze-url', async (req, res) => {
   const { url, apiKey } = req.body;
   if (!url) {
@@ -101,95 +192,153 @@ app.post('/api/analyze-url', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL format' });
     }
 
-    // Query threat intelligence database early
+    // Quick threat feed check
     const threatFeed = checkThreatDatabase(url);
 
     // 1. Trace redirects
     const redirectChain = await traceRedirects(url);
-    const finalUrl = redirectChain[redirectChain.length - 1].url;
+    const finalHop = redirectChain[redirectChain.length - 1];
+    const finalUrl = finalHop.url;
     const finalDomainInfo = extractDomainInfo(finalUrl);
 
-    // 2. Typosquatting check on original and final domains
+    // 2. Typosquatting check
     const typosquat = checkTyposquatting(domainInfo.domain);
     const finalTyposquat = checkTyposquatting(finalDomainInfo.domain);
 
-    // 3. Webpage Content Analysis (Credential harvesting & Visual screenshot scan)
+    // 3. Whitelist check early — if it's a known trusted domain, skip aggressive checks
+    const isOriginalTrusted = isWhitelistedDomain(domainInfo.domain);
+    const isFinalTrusted = isWhitelistedDomain(finalDomainInfo.domain);
+
+    // 4. Fetch webpage content + screenshot in parallel
     let webpageContent = '';
-    let pageAnalysis = { hasPasswordInput: false, hasLoginForm: false, keywordsFound: [], strippedText: '' };
+    let pageAnalysis = {
+      hasPasswordInput: false, hasLoginForm: false,
+      keywordsFound: [], brandKeywords: [], strippedText: '', formCount: 0
+    };
     let screenshotBase64 = null;
-    
-    // Fetch the final landing page content and capture webpage visual screenshot in parallel
+
     try {
-      const pageRes = await fetch(finalUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      });
-      if (pageRes.ok) {
-        webpageContent = await pageRes.text();
+      const [pageResult, screenshotResult] = await Promise.allSettled([
+        // Fetch page HTML
+        (async () => {
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 12000);
+          const r = await fetch(finalUrl, {
+            method: 'GET',
+            signal: controller.signal,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
+            }
+          });
+          clearTimeout(t);
+          if (r.ok) return await r.text();
+          return '';
+        })(),
+        // Capture screenshot
+        captureScreenshot(finalUrl)
+      ]);
+
+      if (pageResult.status === 'fulfilled' && pageResult.value) {
+        webpageContent = pageResult.value;
         pageAnalysis = analyzeHtmlContent(webpageContent, finalDomainInfo.domain);
       }
-
-      // Fetch visual screenshot from Microlink API
-      const screenshotApiUrl = `https://api.microlink.io?url=${encodeURIComponent(finalUrl)}&screenshot=true&embed=screenshot.url`;
-      const screenshotRes = await fetch(screenshotApiUrl);
-      if (screenshotRes.ok) {
-        const buffer = await screenshotRes.arrayBuffer();
-        screenshotBase64 = Buffer.from(buffer).toString('base64');
+      if (screenshotResult.status === 'fulfilled' && screenshotResult.value) {
+        screenshotBase64 = screenshotResult.value;
       }
     } catch (e) {
-      console.warn('Could not fetch webpage content or visual screenshot:', e.message);
+      console.warn('Content/screenshot fetch warning:', e.message);
     }
 
-    // 4. AI / Heuristics analysis
+    // 5. Build context string for AI analysis
+    const contextStr = [
+      `Original URL: ${url}`,
+      `Domain: ${domainInfo.domain}`,
+      `TLD: ${domainInfo.tld}`,
+      `Protocol: ${domainInfo.protocol}`,
+      `Is Trusted Domain: ${isOriginalTrusted}`,
+      `Redirect Chain (${redirectChain.length} hops): ${redirectChain.map(h => `${h.url} [${h.status}]`).join(' → ')}`,
+      `Final Landing Domain: ${finalDomainInfo.domain}`,
+      `Final URL is Trusted: ${isFinalTrusted}`,
+      `Has Password Input: ${pageAnalysis.hasPasswordInput}`,
+      `Has Login Form: ${pageAnalysis.hasLoginForm}`,
+      `Brand Keywords on Page: ${pageAnalysis.brandKeywords.join(', ') || 'None'}`,
+      `Threat Intel Match: ${threatFeed ? `YES - ${threatFeed.details}` : 'No'}`,
+      `Webpage Text Snippet: ${pageAnalysis.strippedText.substring(0, 3000)}`
+    ].join('\n');
+
+    // 6. AI / Heuristics analysis
     let aiAnalysis;
     let isSimulated = false;
 
-    const contextStr = `Original URL: ${url}\nDomain: ${domainInfo.domain}\nTLD: ${domainInfo.tld}\nProtocol: ${domainInfo.protocol}\nRedirect Chain: ${JSON.stringify(redirectChain)}\nFinal Domain: ${finalDomainInfo.domain}\nWebpage Text Snippet: ${pageAnalysis.strippedText}\nHas Password Fields: ${pageAnalysis.hasPasswordInput}`;
-
     try {
       aiAnalysis = await runGeminiAnalysis(contextStr, false, apiKey, screenshotBase64);
+      console.log(`Gemini analysis complete: verdict=${aiAnalysis.overall_verdict}, score=${aiAnalysis.ai_risk_score}`);
     } catch (e) {
-      console.warn('Falling back to local heuristic url analysis:', e.message);
+      console.warn('Gemini failed, using local heuristics:', e.message);
+      isSimulated = true;
+
       if (threatFeed) {
         aiAnalysis = {
-          urgency: { score: 8, explanation: `Threat intelligence signature flags this URL as an active phishing page targeting ${threatFeed.brand} customers.` },
-          impersonation: { detected: true, targetBrand: threatFeed.brand, explanation: `Webpage spoofing: Visually mimics ${threatFeed.brand} login portals on an unaligned domain.` },
-          lures: { types: ['urgency', 'credential_harvest'], explanation: `Uses simulated ${threatFeed.brand} interfaces to collect credentials.` },
+          urgency: { score: 8, explanation: `Threat intelligence database flags this URL as an active phishing campaign targeting ${threatFeed.brand} users.` },
+          impersonation: { detected: true, targetBrand: threatFeed.brand, explanation: `URL matches known phishing signature for ${threatFeed.brand} spoofing.` },
+          lures: { types: ['urgency', 'credential_harvest'], explanation: `Simulates ${threatFeed.brand} interfaces to collect login credentials.` },
           suspicious_phrases: [{ phrase: 'login', category: 'urgency' }, { phrase: 'password', category: 'action' }],
           overall_verdict: 'MALICIOUS',
-          ai_risk_score: 95,
-          summary: `Offline heuristic: Flagged in threat signature database as targeting ${threatFeed.brand}.`
+          ai_risk_score: 90,
+          summary: `Offline threat database: Confirmed phishing campaign targeting ${threatFeed.brand} customers.`,
+          isLocalFallback: true
+        };
+      } else if (pageAnalysis.hasPasswordInput && pageAnalysis.brandKeywords.length > 0 && !isFinalTrusted) {
+        const brand = pageAnalysis.brandKeywords[0];
+        aiAnalysis = {
+          urgency: { score: 7, explanation: 'Webpage hosts credential-capture form with brand-spoofing keywords.' },
+          impersonation: { detected: true, targetBrand: brand, explanation: `Page visually references "${brand}" but hosted on unrelated domain "${finalDomainInfo.domain}".` },
+          lures: { types: ['credential_harvest', 'urgency'], explanation: 'Login form designed to capture user credentials under false pretense.' },
+          suspicious_phrases: [{ phrase: brand, category: 'brand_impersonation' }, { phrase: 'login', category: 'urgency' }],
+          overall_verdict: 'MALICIOUS',
+          ai_risk_score: 80,
+          summary: `Local heuristic: Password form detected referencing "${brand}" on non-official domain — high phishing probability.`,
+          isLocalFallback: true
         };
       } else {
         aiAnalysis = runLocalHeuristicAnalysis(contextStr, false);
       }
-      isSimulated = true;
     }
 
-    // 4. Calculate Risk Score and compile threat indicators
+    // 7. Build indicators and calculate final risk score
     let score = 0;
     const indicators = [];
 
+    // Threat feed match (highest priority)
     if (threatFeed) {
       indicators.push({
-        title: `Threat Intel Signature Match`,
+        title: `Threat Intelligence Match: ${threatFeed.brand}`,
         description: threatFeed.details,
         category: 'reputation',
         severity: 'high',
-        weight: 95
+        weight: 90
       });
-      score += 95;
+      score += 90;
     }
 
-    // High-risk TLDs
-    const HIGH_RISK_TLDS = new Set(['.xyz', '.top', '.club', '.work', '.ru', '.cc', '.cn', '.fit', '.gq', '.tk', '.ml', '.cf', '.ga', '.click', '.link', '.zip', '.mov']);
-
-    if (typosquat.isSpoof) {
+    // Typosquatting check (only if NOT whitelisted)
+    if (!isOriginalTrusted && typosquat.isSpoof) {
       indicators.push({
-        title: 'Brand Typosquatting',
-        description: `The domain matches standard phishing typosquat patterns: ${typosquat.reason}`,
+        title: 'Brand Typosquatting Detected',
+        description: `${typosquat.reason}. The domain appears to be impersonating a legitimate brand to deceive users.`,
+        category: 'reputation',
+        severity: 'high',
+        weight: 50
+      });
+      score += 50;
+    }
+
+    if (!isFinalTrusted && finalTyposquat.isSpoof && finalDomainInfo.domain !== domainInfo.domain) {
+      indicators.push({
+        title: 'Final Domain Typosquatting',
+        description: `The redirect destination "${finalDomainInfo.domain}" appears to impersonate a legitimate brand. ${finalTyposquat.reason}`,
         category: 'reputation',
         severity: 'high',
         weight: 45
@@ -197,68 +346,74 @@ app.post('/api/analyze-url', async (req, res) => {
       score += 45;
     }
 
+    // High-risk TLD
+    const HIGH_RISK_TLDS = new Set(['.xyz', '.top', '.club', '.work', '.ru', '.cc', '.cn', '.fit', '.gq', '.tk', '.ml', '.cf', '.ga', '.click', '.link', '.zip', '.mov', '.win', '.bid', '.download', '.cheap', '.online', '.site', '.website', '.space']);
     if (HIGH_RISK_TLDS.has(domainInfo.tld)) {
       indicators.push({
-        title: 'High-Risk TLD',
-        description: `The URL uses a top-level domain (${domainInfo.tld}) commonly abused for malicious activities.`,
+        title: 'High-Risk Top-Level Domain',
+        description: `The domain uses TLD "${domainInfo.tld}" which is heavily abused for spam, malware, and phishing campaigns.`,
         category: 'reputation',
-        severity: 'medium',
-        weight: 15
-      });
-      score += 15;
-    }
-
-    // Heuristics: scan landing page HTML credentials and brand keywords matching
-    const brandNames = ['fiverr', 'netflix', 'paypal', 'chase', 'microsoft', 'amazon'];
-    brandNames.forEach(brand => {
-      if (pageAnalysis.hasPasswordInput && pageAnalysis.keywordsFound.includes(brand) && !finalDomainInfo.domain.includes(brand)) {
-        indicators.push({
-          title: `${brand.charAt(0).toUpperCase() + brand.slice(1)} Impersonation Gate`,
-          description: `Webpage hosts password forms and Fiverr/brand keywords, but resolves to unaligned domain "${finalDomainInfo.domain}". This points to phishing credential harvesting.`,
-          category: 'behavioral',
-          severity: 'high',
-          weight: 55
-        });
-        score += 55;
-      }
-    });
-
-    // Count domain-changing redirects
-    let domainDriftRedirects = 0;
-    for (let i = 0; i < redirectChain.length - 1; i++) {
-      const fromDom = extractDomainInfo(redirectChain[i].url).domain;
-      const toDom = extractDomainInfo(redirectChain[i + 1].url).domain;
-      if (fromDom && toDom && fromDom !== toDom) {
-        domainDriftRedirects++;
-      }
-    }
-
-    if (redirectChain.length > 3 || (domainDriftRedirects > 0 && redirectChain.length > 2)) {
-      indicators.push({
-        title: 'Multiple Redirection Hops',
-        description: `The URL redirected ${redirectChain.length - 1} times. Phishing sites often chain multiple redirects across different domains to evade security scanners.`,
-        category: 'redirects',
         severity: 'medium',
         weight: 20
       });
       score += 20;
     }
 
-    if (domainInfo.domain !== finalDomainInfo.domain) {
+    // Credential harvesting + brand mismatch
+    if (pageAnalysis.hasPasswordInput && pageAnalysis.brandKeywords.length > 0 && !isFinalTrusted) {
+      const detectedBrand = pageAnalysis.brandKeywords[0];
       indicators.push({
-        title: 'Domain Redirection Drift',
-        description: `The link redirects from "${domainInfo.domain}" to a completely different domain "${finalDomainInfo.domain}".`,
-        category: 'redirects',
+        title: `${detectedBrand.charAt(0).toUpperCase() + detectedBrand.slice(1)} Credential Harvesting Gate`,
+        description: `The webpage contains a password form and references the "${detectedBrand}" brand, but is hosted on "${finalDomainInfo.domain}" — not ${detectedBrand}'s official domain. This is a classic phishing credential harvester.`,
+        category: 'behavioral',
         severity: 'high',
-        weight: 25
+        weight: 60
       });
-      score += 25;
+      score += 60;
+    } else if (pageAnalysis.hasPasswordInput && !isFinalTrusted && pageAnalysis.hasLoginForm) {
+      indicators.push({
+        title: 'Suspicious Login Form',
+        description: `The page contains a login form with password field on a potentially unvetted domain.`,
+        category: 'behavioral',
+        severity: 'medium',
+        weight: 20
+      });
+      score += 20;
     }
 
+    // Redirect chain
+    let domainDriftCount = 0;
+    for (let i = 0; i < redirectChain.length - 1; i++) {
+      const fromDom = extractDomainInfo(redirectChain[i].url).domain;
+      const toDom = extractDomainInfo(redirectChain[i + 1].url).domain;
+      if (fromDom && toDom && fromDom !== toDom) domainDriftCount++;
+    }
+
+    if (redirectChain.length > 2 && domainDriftCount > 0) {
+      indicators.push({
+        title: 'Multi-Domain Redirect Chain',
+        description: `URL redirected ${redirectChain.length - 1} times, crossing ${domainDriftCount} different domain(s). Legitimate sites rarely chain redirects across multiple domains.`,
+        category: 'redirects',
+        severity: domainDriftCount >= 2 ? 'high' : 'medium',
+        weight: domainDriftCount >= 2 ? 30 : 15
+      });
+      score += domainDriftCount >= 2 ? 30 : 15;
+    } else if (redirectChain.length > 1 && domainInfo.domain !== finalDomainInfo.domain) {
+      indicators.push({
+        title: 'Domain Redirection Drift',
+        description: `The link starts at "${domainInfo.domain}" but redirects to a completely different domain "${finalDomainInfo.domain}".`,
+        category: 'redirects',
+        severity: 'medium',
+        weight: 15
+      });
+      score += 15;
+    }
+
+    // HTTP (no encryption)
     if (finalDomainInfo.protocol === 'http:') {
       indicators.push({
-        title: 'Unencrypted Connection (HTTP)',
-        description: 'The landing page uses unencrypted HTTP instead of HTTPS. Legacy channels are insecure.',
+        title: 'Unencrypted HTTP Connection',
+        description: 'The landing page uses unencrypted HTTP. Legitimate modern websites use HTTPS. Data transmitted is visible to network eavesdroppers.',
         category: 'security',
         severity: 'medium',
         weight: 15
@@ -266,70 +421,69 @@ app.post('/api/analyze-url', async (req, res) => {
       score += 15;
     }
 
-    // AI indicators
+    // AI-derived indicators (only add if not already captured by heuristics)
     if (aiAnalysis.urgency && aiAnalysis.urgency.score >= 5) {
       indicators.push({
-        title: 'Urgent Demand Detected',
+        title: 'Urgent Demand Detected (AI)',
         description: aiAnalysis.urgency.explanation,
         category: 'behavioral',
         severity: aiAnalysis.urgency.score >= 8 ? 'high' : 'medium',
-        weight: aiAnalysis.urgency.score * 2
+        weight: Math.round(aiAnalysis.urgency.score * 2)
       });
-      score += aiAnalysis.urgency.score * 2;
+      score += Math.round(aiAnalysis.urgency.score * 2);
     }
 
-    if (aiAnalysis.impersonation && aiAnalysis.impersonation.detected) {
-      indicators.push({
-        title: `Impersonation Warning: ${aiAnalysis.impersonation.targetBrand}`,
-        description: aiAnalysis.impersonation.explanation,
-        category: 'behavioral',
-        severity: 'high',
-        weight: 35
-      });
-      score += 35;
-    }
-
-    // Heuristics checks inside AI response
-    if (aiAnalysis.ai_risk_score) {
-      // Add weight if AI score is high and not already captured
-      if (aiAnalysis.ai_risk_score > 60 && score < 50) {
-        score += 20;
+    if (aiAnalysis.impersonation && aiAnalysis.impersonation.detected && !threatFeed) {
+      const alreadyFlagged = indicators.some(i => i.category === 'behavioral' && i.title.includes('Harvesting'));
+      if (!alreadyFlagged) {
+        indicators.push({
+          title: `Brand Impersonation Detected: ${aiAnalysis.impersonation.targetBrand} (AI)`,
+          description: aiAnalysis.impersonation.explanation,
+          category: 'behavioral',
+          severity: 'high',
+          weight: 40
+        });
+        score += 40;
       }
     }
 
-    // Whitelist check: prevent false positives on massive, globally reputable domains
-    const POPULAR_DOMAINS_SET = new Set([
-      'google.com', 'google.co.in', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
-      'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
-      'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
-      'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
-      'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 
-      'fiverr.com', 'flipkart.com', 'wikipedia.org', 'reddit.com', 'stackoverflow.com'
-    ]);
-
-    if (POPULAR_DOMAINS_SET.has(finalDomainInfo.domain)) {
-      score = 0;
-      indicators.length = 0; // Clear false heuristic indicators
+    // Incorporate AI risk score as a weighted factor
+    if (aiAnalysis.ai_risk_score && aiAnalysis.ai_risk_score > 50) {
+      const aiBoost = Math.round((aiAnalysis.ai_risk_score - 50) * 0.4);
+      if (aiBoost > 0 && score < aiAnalysis.ai_risk_score) {
+        score += aiBoost;
+      }
     }
 
-    score = Math.min(score, 100);
+    // Override: if final domain is whitelisted, nullify heuristic false positives
+    if (isOriginalTrusted && isFinalTrusted) {
+      score = 0;
+      indicators.length = 0;
+    } else if (isFinalTrusted && score > 0 && !threatFeed && !typosquat.isSpoof) {
+      // Landing page is trusted but origin had some flags (e.g., redirector service)
+      score = Math.min(score, 15); // Cap at low suspicious
+      while (indicators.length > 1) indicators.pop();
+    }
 
-    let verdict = 'SAFE';
-    if (score >= 60) verdict = 'MALICIOUS';
-    else if (score >= 30) verdict = 'SUSPICIOUS';
+    score = Math.min(Math.round(score), 100);
+    const verdict = score >= 60 ? 'MALICIOUS' : (score >= 30 ? 'SUSPICIOUS' : 'SAFE');
 
-    const isSpoofed = typosquat.isSpoof || finalTyposquat.isSpoof || !!threatFeed || (aiAnalysis && aiAnalysis.impersonation && aiAnalysis.impersonation.detected);
+    const isSpoofed = (!isOriginalTrusted && typosquat.isSpoof) ||
+      (!isFinalTrusted && finalTyposquat.isSpoof) ||
+      !!threatFeed ||
+      (aiAnalysis?.impersonation?.detected === true && aiAnalysis?.ai_risk_score > 50);
+
     const spoofInfo = {
       isSpoof: isSpoofed,
-      reason: typosquat.isSpoof 
-        ? typosquat.reason 
-        : (finalTyposquat.isSpoof 
-            ? finalTyposquat.reason 
-            : (threatFeed 
-                ? `Threat Intel: Spoofing "${threatFeed.brand}" brand templates` 
-                : (aiAnalysis?.impersonation?.detected 
-                    ? `Impersonating brand "${aiAnalysis.impersonation.targetBrand}"` 
-                    : '')))
+      reason: typosquat.isSpoof && !isOriginalTrusted
+        ? typosquat.reason
+        : (finalTyposquat.isSpoof && !isFinalTrusted
+          ? finalTyposquat.reason
+          : (threatFeed
+            ? `Threat Intel: Spoofing "${threatFeed.brand}" brand`
+            : (aiAnalysis?.impersonation?.detected
+              ? `AI detected impersonation of "${aiAnalysis.impersonation.targetBrand}"`
+              : '')))
     };
 
     res.json({
@@ -338,7 +492,16 @@ app.post('/api/analyze-url', async (req, res) => {
       domainInfo,
       redirectChain,
       finalUrl,
+      finalDomainInfo,
+      isOriginalTrusted,
+      isFinalTrusted,
       typosquat: spoofInfo,
+      pageAnalysis: {
+        hasPasswordInput: pageAnalysis.hasPasswordInput,
+        hasLoginForm: pageAnalysis.hasLoginForm,
+        brandKeywords: pageAnalysis.brandKeywords,
+        formCount: pageAnalysis.formCount
+      },
       aiAnalysis,
       isSimulated,
       score,
@@ -352,7 +515,7 @@ app.post('/api/analyze-url', async (req, res) => {
   }
 });
 
-// Route: Analyze Email
+// ===== Route: Analyze Email =====
 app.post('/api/analyze-email', async (req, res) => {
   const { rawEmail, apiKey } = req.body;
   if (!rawEmail) {
@@ -360,7 +523,6 @@ app.post('/api/analyze-email', async (req, res) => {
   }
 
   try {
-    // 1. Parse raw text into headers and body
     const emailData = parseRawEmail(rawEmail);
     const headers = emailData.headers;
     const body = emailData.body;
@@ -369,55 +531,61 @@ app.post('/api/analyze-email', async (req, res) => {
     const fromAddr = extractEmailAddress(fromHeader);
     const fromInfo = extractDomainInfo(fromAddr);
 
-    // 2. Perform DNS Authentication Checks
+    // DNS authentication checks
     let dnsCheck = null;
     if (fromInfo.domain) {
       dnsCheck = await verifyDomainDNS(fromInfo.domain);
     }
 
-    // 3. Extract and analyze links inside the body
+    // Extract and analyze links inside the body
     const links = extractAndAnalyzeLinks(body, fromInfo.domain);
 
-    // 4. Run AI Analysis
+    // Build context string for AI
+    const contextStr = [
+      `From: ${fromHeader}`,
+      `From Address: ${fromAddr}`,
+      `From Domain: ${fromInfo.domain}`,
+      `Subject: ${headers['subject'] || 'No Subject'}`,
+      `Reply-To: ${headers['reply-to'] || 'None'}`,
+      `Return-Path: ${headers['return-path'] || 'None'}`,
+      `X-Mailer: ${headers['x-mailer'] || 'Unknown'}`,
+      `SPF Check: ${dnsCheck ? (dnsCheck.spf.found ? `PASS (${dnsCheck.spf.status})` : 'FAIL - No SPF record') : 'Not checked'}`,
+      `DMARC Check: ${dnsCheck ? (dnsCheck.dmarc.found ? `PASS (policy: ${dnsCheck.dmarc.policy})` : 'FAIL - No DMARC record') : 'Not checked'}`,
+      `Links Found: ${links.length} (${links.filter(l => l.misleading).length} misleading, ${links.filter(l => l.typosquat?.isSpoof).length} typosquatting)`,
+      `Body Content:\n${body}`
+    ].join('\n');
+
     let aiAnalysis;
     let isSimulated = false;
 
-    const contextStr = `From: ${fromHeader} (${fromAddr})
-Subject: ${headers['subject'] || 'No Subject'}
-Reply-To: ${headers['reply-to'] || 'None'}
-Return-Path: ${headers['return-path'] || 'None'}
-SPF/DMARC: ${JSON.stringify(dnsCheck)}
-Links Extracted: ${JSON.stringify(links)}
-Body Content:
-${body}`;
-
     try {
       aiAnalysis = await runGeminiAnalysis(contextStr, true, apiKey);
+      console.log(`Gemini email analysis: verdict=${aiAnalysis.overall_verdict}, score=${aiAnalysis.ai_risk_score}`);
     } catch (e) {
-      console.warn('Falling back to local heuristic email analysis:', e.message);
-      aiAnalysis = runLocalHeuristicAnalysis(body, true, headers);
+      console.warn('Gemini email analysis failed, using local heuristics:', e.message);
+      aiAnalysis = runLocalHeuristicAnalysis(contextStr, true, headers);
       isSimulated = true;
     }
 
-    // 5. Aggregate Risk Scoring & Indicators
+    // Risk scoring
     let score = 0;
     const indicators = [];
 
-    // Header checks
     const replyTo = extractEmailAddress(headers['reply-to'] || '');
     const returnPath = extractEmailAddress(headers['return-path'] || '');
 
+    // Header mismatch checks
     if (replyTo && fromInfo.domain) {
       const replyToInfo = extractDomainInfo(replyTo);
       if (replyToInfo.domain && fromInfo.domain !== replyToInfo.domain) {
         indicators.push({
           title: 'Reply-To Address Mismatch',
-          description: `Replies are routed to "${replyTo}" which belongs to a different domain than the sender "${fromInfo.domain}".`,
+          description: `Replies route to "${replyTo}" (domain: ${replyToInfo.domain}), but the visible sender is "${fromInfo.domain}". This header manipulation is a classic phishing tactic to capture reply data.`,
           category: 'headers',
           severity: 'high',
-          weight: 25
+          weight: 30
         });
-        score += 25;
+        score += 30;
       }
     }
 
@@ -425,58 +593,55 @@ ${body}`;
       const returnPathInfo = extractDomainInfo(returnPath);
       if (returnPathInfo.domain && fromInfo.domain !== returnPathInfo.domain) {
         indicators.push({
-          title: 'Return-Path Address Mismatch',
-          description: `Bounce-backs and delivery status reports are routed to "${returnPath}" instead of the visible sender domain "${fromInfo.domain}".`,
+          title: 'Return-Path Domain Mismatch',
+          description: `Bounce-back messages route to "${returnPath}" (domain: ${returnPathInfo.domain}) instead of the visible sender domain "${fromInfo.domain}". This suggests the email infrastructure is controlled by a third party.`,
           category: 'headers',
           severity: 'medium',
-          weight: 15
+          weight: 20
         });
-        score += 15;
+        score += 20;
       }
     }
 
-    // Check email authentication
+    // DNS authentication failures
     if (dnsCheck) {
       if (!dnsCheck.spf.found) {
         indicators.push({
           title: 'Missing SPF Record',
-          description: `The sender domain "${fromInfo.domain}" does not specify SPF records. Mail systems cannot verify if this server is authorized to send emails for them.`,
+          description: `The sender domain "${fromInfo.domain}" has no SPF record. Without SPF, any server can forge emails from this domain and mail servers cannot verify authenticity.`,
           category: 'authentication',
           severity: 'medium',
-          weight: 15
+          weight: 20
         });
-        score += 15;
+        score += 20;
       }
       if (!dnsCheck.dmarc.found) {
         indicators.push({
-          title: 'Missing DMARC Record',
-          description: `The sender domain "${fromInfo.domain}" has no DMARC policy. This allows attackers to forge emails using this domain name easily.`,
+          title: 'Missing DMARC Policy',
+          description: `"${fromInfo.domain}" publishes no DMARC record. DMARC tells receiving servers how to handle forged emails. Without it, spoofed emails pass freely.`,
           category: 'authentication',
           severity: 'medium',
-          weight: 15
+          weight: 20
         });
-        score += 15;
+        score += 20;
+      } else if (dnsCheck.dmarc.policy === 'none') {
+        indicators.push({
+          title: 'Weak DMARC Policy (None)',
+          description: `DMARC policy is set to "none" — emails will not be rejected even if they fail authentication checks. This provides minimal protection.`,
+          category: 'authentication',
+          severity: 'low',
+          weight: 10
+        });
+        score += 10;
       }
     }
 
-    // Check link alerts
+    // Link analysis
     const misleadingLinks = links.filter(l => l.misleading);
     if (misleadingLinks.length > 0) {
       indicators.push({
-        title: 'Deceptive Hyperlink Text',
-        description: `Found ${misleadingLinks.length} URL link(s) where the visual anchor text mimics one website, but the actual hyperlink destination leads elsewhere.`,
-        category: 'links',
-        severity: 'high',
-        weight: 30
-      });
-      score += 30;
-    }
-
-    const typosquatLinks = links.filter(l => l.typosquat && l.typosquat.isSpoof);
-    if (typosquatLinks.length > 0) {
-      indicators.push({
-        title: 'Suspicious Domain Link',
-        description: `The email contains links that use brand typosquatting (e.g. mimicking well-known brands to fool recipients).`,
+        title: 'Deceptive Hyperlinks Detected',
+        description: `Found ${misleadingLinks.length} link(s) where the visible text shows one domain but the actual destination is different. Example: Appears to link to "${misleadingLinks[0].anchorText}" but goes to "${misleadingLinks[0].href}".`,
         category: 'links',
         severity: 'high',
         weight: 35
@@ -484,45 +649,58 @@ ${body}`;
       score += 35;
     }
 
-    const highRiskTldLinks = links.filter(l => l.highRiskTld);
-    if (highRiskTldLinks.length > 0) {
+    const typosquatLinks = links.filter(l => l.typosquat?.isSpoof);
+    if (typosquatLinks.length > 0) {
       indicators.push({
-        title: 'High-Risk TLD in Links',
-        description: `Links in the email direct to domains registered under high-risk TLDs like ${Array.from(new Set(highRiskTldLinks.map(l => l.tld))).join(', ')}.`,
+        title: 'Typosquatted Domain in Links',
+        description: `${typosquatLinks.length} link(s) point to domains that impersonate well-known brands through typosquatting (e.g., slight misspellings or added words).`,
         category: 'links',
-        severity: 'medium',
-        weight: 15
+        severity: 'high',
+        weight: 40
       });
-      score += 15;
+      score += 40;
     }
 
-    // AI indicators
+    const highRiskTldLinks = links.filter(l => l.highRiskTld);
+    if (highRiskTldLinks.length > 0) {
+      const tlds = [...new Set(highRiskTldLinks.map(l => l.tld))].join(', ');
+      indicators.push({
+        title: 'High-Risk TLD Links',
+        description: `Email contains ${highRiskTldLinks.length} link(s) using high-risk TLDs (${tlds}) which are frequently registered for phishing and spam operations.`,
+        category: 'links',
+        severity: 'medium',
+        weight: 20
+      });
+      score += 20;
+    }
+
+    // AI behavioral indicators
     if (aiAnalysis.urgency && aiAnalysis.urgency.score >= 5) {
       indicators.push({
-        title: 'Urgent Tone Flagged',
+        title: 'Urgent/Threatening Language (AI)',
         description: aiAnalysis.urgency.explanation,
         category: 'behavioral',
         severity: aiAnalysis.urgency.score >= 8 ? 'high' : 'medium',
-        weight: aiAnalysis.urgency.score * 2
+        weight: Math.round(aiAnalysis.urgency.score * 2)
       });
-      score += aiAnalysis.urgency.score * 2;
+      score += Math.round(aiAnalysis.urgency.score * 2);
     }
 
     if (aiAnalysis.impersonation && aiAnalysis.impersonation.detected) {
       indicators.push({
-        title: `Brand Impersonation: ${aiAnalysis.impersonation.targetBrand}`,
+        title: `Brand Impersonation: ${aiAnalysis.impersonation.targetBrand} (AI)`,
         description: aiAnalysis.impersonation.explanation,
         category: 'behavioral',
         severity: 'high',
-        weight: 30
+        weight: 35
       });
-      score += 30;
+      score += 35;
     }
 
     if (aiAnalysis.lures && aiAnalysis.lures.types && aiAnalysis.lures.types.length > 0) {
       indicators.push({
-        title: 'Psychological Manipulation Lure',
-        description: aiAnalysis.lures.explanation,
+        title: 'Psychological Manipulation Tactics (AI)',
+        description: `${aiAnalysis.lures.explanation} Lure types: ${aiAnalysis.lures.types.join(', ')}.`,
         category: 'behavioral',
         severity: 'medium',
         weight: 15
@@ -530,22 +708,21 @@ ${body}`;
       score += 15;
     }
 
-    // Fallback alerts if simulated local heuristics
-    if (isSimulated && aiAnalysis.alerts) {
-      // Avoid duplicates but pull in any extra alerts if any
+    // AI score boost
+    if (aiAnalysis.ai_risk_score > 50 && score < aiAnalysis.ai_risk_score) {
+      const boost = Math.round((aiAnalysis.ai_risk_score - score) * 0.3);
+      score += boost;
     }
 
-    score = Math.min(score, 100);
-
-    let verdict = 'SAFE';
-    if (score >= 60) verdict = 'MALICIOUS';
-    else if (score >= 30) verdict = 'SUSPICIOUS';
+    score = Math.min(Math.round(score), 100);
+    const verdict = score >= 60 ? 'MALICIOUS' : (score >= 30 ? 'SUSPICIOUS' : 'SAFE');
 
     res.json({
       success: true,
       headersParsed: headers,
-      linksAnalyzed: links,
+      fromInfo,
       dnsCheck,
+      linksAnalyzed: links,
       aiAnalysis,
       isSimulated,
       score,
@@ -558,9 +735,14 @@ ${body}`;
   }
 });
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Start Server
 app.listen(PORT, () => {
-  console.log(`====================================================`);
-  console.log(`Akhil PhishGuard Backend is running on port ${PORT}`);
-  console.log(`====================================================`);
+  console.log('====================================================');
+  console.log(`  Akhil PhishGuard Backend running on port ${PORT}`);
+  console.log('====================================================');
 });

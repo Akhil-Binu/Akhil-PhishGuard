@@ -3,30 +3,95 @@ import { promisify } from 'util';
 
 const resolveTxtAsync = promisify(dns.resolveTxt);
 
-const POPULAR_DOMAINS = [
-  'google.com', 'google.co.in', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
-  'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
-  'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
-  'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
-  'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 'chase.com',
-  'fiverr.com', 'flipkart.com', 'wikipedia.org', 'reddit.com', 'stackoverflow.com'
-];
+// === TRUSTED BRAND DATABASE ===
+// Maps brand name -> list of ALL legitimate domains for that brand
+const TRUSTED_BRAND_DOMAINS = {
+  google: ['google.com', 'google.co.in', 'google.co.uk', 'google.com.au', 'google.de', 'google.fr', 'google.co.jp', 'googleapis.com', 'gstatic.com', 'googlevideo.com'],
+  youtube: ['youtube.com', 'youtu.be', 'youtube.co.in', 'youtube.co.uk'],
+  facebook: ['facebook.com', 'fb.com', 'fbcdn.net', 'instagram.com'],
+  twitter: ['twitter.com', 'x.com', 't.co'],
+  instagram: ['instagram.com'],
+  linkedin: ['linkedin.com'],
+  apple: ['apple.com', 'icloud.com', 'appleid.apple.com'],
+  microsoft: ['microsoft.com', 'live.com', 'hotmail.com', 'outlook.com', 'bing.com', 'azure.com', 'microsoftonline.com'],
+  amazon: ['amazon.com', 'amazon.in', 'amazon.co.uk', 'amazon.de', 'amazon.fr', 'amazon.co.jp', 'amazon.com.au', 'amazonaws.com', 'amazon.ca', 'amazon.it', 'amazon.es', 'amazon.com.mx'],
+  netflix: ['netflix.com', 'nflximg.net', 'nflxvideo.net'],
+  paypal: ['paypal.com', 'paypal.me'],
+  chase: ['chase.com', 'jpmorganchase.com'],
+  bankofamerica: ['bankofamerica.com', 'bac.com'],
+  wellsfargo: ['wellsfargo.com'],
+  citibank: ['citibank.com', 'citi.com'],
+  yahoo: ['yahoo.com', 'yahoo.co.in', 'yahoo.co.uk', 'yahoo.com.au'],
+  zoom: ['zoom.us', 'zoom.com'],
+  salesforce: ['salesforce.com', 'force.com'],
+  github: ['github.com', 'github.io', 'githubusercontent.com'],
+  adobe: ['adobe.com', 'adobelogin.com'],
+  spotify: ['spotify.com', 'scdn.co'],
+  ebay: ['ebay.com', 'ebay.co.uk', 'ebay.in', 'ebay.com.au'],
+  walmart: ['walmart.com'],
+  fiverr: ['fiverr.com', 'fiverrcdn.com'],
+  flipkart: ['flipkart.com', 'flipkartimg.com', 'fkimg.com'],
+  wikipedia: ['wikipedia.org', 'wikimedia.org'],
+  reddit: ['reddit.com', 'redd.it', 'redditmedia.com', 'redditstatic.com'],
+  stackoverflow: ['stackoverflow.com'],
+  dropbox: ['dropbox.com'],
+  discord: ['discord.com', 'discord.gg', 'discordapp.com'],
+  whatsapp: ['whatsapp.com', 'web.whatsapp.com'],
+  telegram: ['telegram.org', 't.me'],
+  twitch: ['twitch.tv'],
+  steam: ['steampowered.com', 'steamcommunity.com'],
+  nvidia: ['nvidia.com'],
+  intel: ['intel.com'],
+  amd: ['amd.com'],
+  samsung: ['samsung.com'],
+  sony: ['sony.com'],
+  apple: ['apple.com'],
+  hp: ['hp.com', 'hpe.com'],
+  dell: ['dell.com'],
+  lenovo: ['lenovo.com'],
+  tcs: ['tcs.com'],
+  infosys: ['infosys.com'],
+  wipro: ['wipro.com'],
+  sbi: ['sbi.co.in', 'onlinesbi.sbi'],
+  hdfc: ['hdfcbank.com', 'hdfc.com'],
+  icici: ['icicibank.com'],
+  axisbank: ['axisbank.com'],
+  kotak: ['kotakbank.com'],
+};
+
+// Build a flat set of ALL trusted domains for O(1) lookup
+const ALL_TRUSTED_DOMAINS = new Set();
+const BRAND_DOMAIN_MAP = new Map(); // domain -> brand name
+
+for (const [brand, domains] of Object.entries(TRUSTED_BRAND_DOMAINS)) {
+  for (const d of domains) {
+    ALL_TRUSTED_DOMAINS.add(d);
+    BRAND_DOMAIN_MAP.set(d, brand);
+  }
+}
+
+// Also get brand names for substring matching
+const ALL_BRAND_NAMES = Object.keys(TRUSTED_BRAND_DOMAINS);
 
 const HIGH_RISK_TLDS = new Set([
-  '.xyz', '.top', '.club', '.work', '.ru', '.cc', '.cn', '.fit', '.gq', '.tk', 
-  '.ml', '.cf', '.ga', '.click', '.link', '.zip', '.mov', '.win', '.bid', '.download'
+  '.xyz', '.top', '.club', '.work', '.ru', '.cc', '.cn', '.fit', '.gq', '.tk',
+  '.ml', '.cf', '.ga', '.click', '.link', '.zip', '.mov', '.win', '.bid', '.download',
+  '.cheap', '.online', '.site', '.website', '.space', '.host', '.store'
 ]);
 
 // Compute Levenshtein distance between two strings
 function levenshteinDistance(a, b) {
-  const tmp = [];
-  let i, j, alen = a.length, blen = b.length;
+  if (a === b) return 0;
+  const alen = a.length, blen = b.length;
   if (alen === 0) return blen;
   if (blen === 0) return alen;
-  for (i = 0; i <= alen; i++) tmp[i] = [i];
-  for (j = 0; j <= blen; j++) tmp[0][j] = j;
-  for (i = 1; i <= alen; i++) {
-    for (j = 1; j <= blen; j++) {
+  
+  const tmp = [];
+  for (let i = 0; i <= alen; i++) tmp[i] = [i];
+  for (let j = 0; j <= blen; j++) tmp[0][j] = j;
+  
+  for (let i = 1; i <= alen; i++) {
+    for (let j = 1; j <= blen; j++) {
       tmp[i][j] = Math.min(
         tmp[i - 1][j] + 1,
         tmp[i][j - 1] + 1,
@@ -37,33 +102,51 @@ function levenshteinDistance(a, b) {
   return tmp[alen][blen];
 }
 
+// Check if domain is a globally trusted brand domain
+export function isWhitelistedDomain(domain) {
+  if (!domain) return false;
+  const domainLower = domain.toLowerCase().replace(/^www\./, '');
+  
+  // Direct match
+  if (ALL_TRUSTED_DOMAINS.has(domainLower)) return true;
+  
+  // Check if it's a subdomain of a trusted domain
+  for (const trusted of ALL_TRUSTED_DOMAINS) {
+    if (domainLower.endsWith('.' + trusted)) return true;
+  }
+  
+  return false;
+}
+
 // Helper to extract domain and TLD from URL
 export function extractDomainInfo(urlStr) {
   try {
-    // Add protocol if missing
     let formattedUrl = urlStr.trim();
     if (!/^https?:\/\//i.test(formattedUrl)) {
       formattedUrl = 'http://' + formattedUrl;
     }
     const parsed = new URL(formattedUrl);
-    const hostname = parsed.hostname.toLowerCase();
-    
-    // Extract main domain (e.g., mail.google.com -> google.com)
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+
+    // Extract main domain (strip subdomains)
     const parts = hostname.split('.');
     let domain = hostname;
     let tld = '';
-    
+
     if (parts.length >= 2) {
-      tld = '.' + parts[parts.length - 1];
-      // Check for double TLDs like .co.uk
-      if (parts.length >= 3 && (parts[parts.length - 2] === 'co' || parts[parts.length - 2] === 'com' || parts[parts.length - 2] === 'org' || parts[parts.length - 2] === 'net')) {
+      // Handle well-known double TLDs like .co.uk, .co.in, .com.au
+      const secondLast = parts[parts.length - 2];
+      const last = parts[parts.length - 1];
+      
+      if (parts.length >= 3 && ['co', 'com', 'org', 'net', 'gov', 'edu', 'ac'].includes(secondLast)) {
         domain = parts.slice(-3).join('.');
         tld = '.' + parts.slice(-2).join('.');
       } else {
         domain = parts.slice(-2).join('.');
+        tld = '.' + last;
       }
     }
-    
+
     return {
       hostname,
       domain,
@@ -77,121 +160,179 @@ export function extractDomainInfo(urlStr) {
 }
 
 // Typosquatting and Brand impersonation check
+// Returns: { isSpoof, matchedBrand, reason, type }
 export function checkTyposquatting(domain) {
   if (!domain) return { isSpoof: false };
-  
-  const domainLower = domain.toLowerCase();
-  
-  // Check if it's directly one of the popular domains
-  if (POPULAR_DOMAINS.includes(domainLower)) {
-    return { isSpoof: false, matchedBrand: domainLower, exact: true };
+
+  const domainLower = domain.toLowerCase().replace(/^www\./, '');
+
+  // 1. Direct trust check — if it's in our trusted list, it's NOT a spoof
+  if (ALL_TRUSTED_DOMAINS.has(domainLower)) {
+    return { isSpoof: false, matchedBrand: BRAND_DOMAIN_MAP.get(domainLower), exact: true };
   }
-  
-  // Check if it contains a brand domain but with extra characters
-  for (const brand of POPULAR_DOMAINS) {
-    const brandName = brand.split('.')[0];
-    
-    // If it contains the brand name and isn't the brand domain itself
-    if (domainLower.includes(brandName)) {
-      // Exclude cases like "chase" in "chasebank" if they are safe, but in security context,
-      // "paypal-security-update.com" contains "paypal" and is suspicious.
-      // So if it contains the brand name, but the domain isn't exactly the brand, we flag it.
+  // Also check subdomain of trusted
+  for (const trusted of ALL_TRUSTED_DOMAINS) {
+    if (domainLower.endsWith('.' + trusted)) {
+      return { isSpoof: false, matchedBrand: BRAND_DOMAIN_MAP.get(trusted), exact: true };
+    }
+  }
+
+  // Extract just the "brand part" of the domain (before TLD)
+  const parts = domainLower.split('.');
+  // Get the registrable domain name part (e.g., "paypal-security" from "paypal-security.com")
+  let registrableName;
+  if (parts.length >= 3 && ['co', 'com', 'org', 'net', 'gov', 'edu', 'ac'].includes(parts[parts.length - 2])) {
+    // e.g., amazon.co.in -> brand part is "amazon"
+    registrableName = parts[parts.length - 3];
+  } else {
+    registrableName = parts[parts.length - 2];
+  }
+
+  if (!registrableName) return { isSpoof: false };
+
+  // 2. Check for EXACT brand name as registrable name but on a different TLD
+  // e.g., "amazon.xyz", "paypal.cc" - EXACT brand name match
+  for (const brand of ALL_BRAND_NAMES) {
+    if (registrableName === brand) {
+      // The registrable name IS exactly the brand, but on an unusual TLD
+      // This is likely squatting unless it's in our trusted list (already checked above)
       return {
         isSpoof: true,
         matchedBrand: brand,
-        reason: `Contains brand name "${brandName}" in domain "${domainLower}"`
-      };
-    }
-    
-    // Calculate Levenshtein distance on the domain name part
-    const inputBrandName = domainLower.split('.')[0];
-    const dist = levenshteinDistance(inputBrandName, brandName);
-    
-    if (dist > 0 && dist <= 2) {
-      return {
-        isSpoof: true,
-        matchedBrand: brand,
-        reason: `Looks very similar to "${brand}" (Levenshtein distance: ${dist})`
+        reason: `Exact brand name "${brand}" on non-official domain "${domainLower}"`,
+        type: 'brand_on_wrong_tld'
       };
     }
   }
-  
+
+  // 3. Check for brand name as PREFIX/SUFFIX with suspicious additions
+  // e.g., "paypal-security-update.com", "amazon-support.com", "netfllx-billing.com"
+  for (const brand of ALL_BRAND_NAMES) {
+    if (brand.length < 4) continue; // Skip very short brand names to avoid false positives
+    
+    if (registrableName.includes(brand)) {
+      // It contains the brand name — check for separators indicating it's a spoof
+      const withoutBrand = registrableName.replace(brand, '');
+      if (withoutBrand.length > 0) {
+        // Has extra stuff around the brand name: suspicious
+        return {
+          isSpoof: true,
+          matchedBrand: brand,
+          reason: `Contains brand name "${brand}" with modifications: "${domainLower}"`,
+          type: 'brand_with_additions'
+        };
+      }
+    }
+  }
+
+  // 4. Levenshtein distance check for typos
+  // e.g., "paypa1.com", "netlfix.com", "amazzon.com"
+  for (const brand of ALL_BRAND_NAMES) {
+    if (brand.length < 4) continue;
+    const dist = levenshteinDistance(registrableName, brand);
+    const threshold = brand.length <= 5 ? 1 : 2; // Shorter brands need tighter threshold
+    if (dist > 0 && dist <= threshold) {
+      return {
+        isSpoof: true,
+        matchedBrand: brand,
+        reason: `Very similar to "${brand}" (edit distance: ${dist}) — possible typosquatting`,
+        type: 'typosquat'
+      };
+    }
+  }
+
   return { isSpoof: false };
 }
 
 // Trace URL redirects
-export async function traceRedirects(startUrl, maxRedirects = 5) {
+export async function traceRedirects(startUrl, maxRedirects = 7) {
   let currentUrl = startUrl.trim();
   if (!/^https?:\/\//i.test(currentUrl)) {
     currentUrl = 'http://' + currentUrl;
   }
-  
+
   const chain = [];
   let redirectsCount = 0;
-  
+  const seen = new Set();
+
   while (redirectsCount < maxRedirects) {
+    if (seen.has(currentUrl)) {
+      chain.push({ url: currentUrl, status: 'Loop Detected', error: 'Redirect loop' });
+      break;
+    }
+    seen.add(currentUrl);
+
     try {
-      chain.push({ url: currentUrl, status: 200 }); // Default, updated on next step
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
       
       const response = await fetch(currentUrl, {
         method: 'GET',
-        redirect: 'manual', // Do not automatically follow
+        redirect: 'manual',
+        signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
         }
       });
-      
-      chain[chain.length - 1].status = response.status;
-      
-      // If redirect status (300-399)
+      clearTimeout(timeoutId);
+
+      chain.push({ url: currentUrl, status: response.status });
+
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
-        if (!location) {
-          break; // Redirect without location header
-        }
-        
-        // Handle relative URLs
+        if (!location) break;
+
         let nextUrl = location;
         if (!/^https?:\/\//i.test(location)) {
-          const origin = new URL(currentUrl).origin;
-          nextUrl = new URL(location, origin).href;
+          try {
+            nextUrl = new URL(location, currentUrl).href;
+          } catch {
+            nextUrl = new URL(currentUrl).origin + '/' + location.replace(/^\//, '');
+          }
         }
-        
         currentUrl = nextUrl;
         redirectsCount++;
       } else {
-        break; // Reached final URL
+        break;
       }
     } catch (error) {
-      chain[chain.length - 1].status = 'Error / Blocked';
-      chain[chain.length - 1].error = error.message;
+      if (error.name === 'AbortError') {
+        chain.push({ url: currentUrl, status: 'Timeout', error: 'Request timed out (8s)' });
+      } else {
+        chain.push({ url: currentUrl, status: 'Error', error: error.message });
+      }
       break;
     }
   }
-  
+
+  if (chain.length === 0) {
+    chain.push({ url: currentUrl, status: 'Unknown' });
+  }
+
   return chain;
 }
 
 // Parse Raw Email Headers & Body
 export function parseRawEmail(rawText) {
-  if (!rawText) return null;
-  
+  if (!rawText) return { headers: {}, body: '' };
+
   const lines = rawText.split(/\r?\n/);
   const headers = {};
   let bodyLines = [];
   let isHeaderSection = true;
   let currentHeaderKey = null;
-  
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    
+
     if (isHeaderSection) {
       if (line.trim() === '') {
         isHeaderSection = false;
         continue;
       }
-      
-      // Header continuation line (starts with space or tab)
+
       if (/^\s/.test(line) && currentHeaderKey) {
         headers[currentHeaderKey] += ' ' + line.trim();
       } else {
@@ -200,8 +341,6 @@ export function parseRawEmail(rawText) {
           currentHeaderKey = match[1].toLowerCase();
           headers[currentHeaderKey] = match[2].trim();
         } else {
-          // If we encounter a line that doesn't look like a header in the header section
-          // it might be a body without empty line separator.
           isHeaderSection = false;
           bodyLines.push(line);
         }
@@ -210,12 +349,11 @@ export function parseRawEmail(rawText) {
       bodyLines.push(line);
     }
   }
-  
-  const body = bodyLines.join('\n');
-  return { headers, body };
+
+  return { headers, body: bodyLines.join('\n') };
 }
 
-// Extracts emails from headers like "John Doe <john@example.com>"
+// Extracts email address from header like "John Doe <john@example.com>"
 export function extractEmailAddress(headerValue) {
   if (!headerValue) return '';
   const match = headerValue.match(/<([^>]+)>/) || headerValue.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
@@ -226,109 +364,105 @@ export function extractEmailAddress(headerValue) {
 export async function verifyDomainDNS(domain) {
   const result = {
     spf: { found: false, record: '', status: 'missing' },
-    dmarc: { found: false, record: '', status: 'missing' }
+    dmarc: { found: false, record: '', status: 'missing' },
+    mx: { found: false, records: [] }
   };
-  
+
   if (!domain) return result;
-  
+
   try {
-    // Lookup SPF record
+    // SPF
     const txtRecords = await resolveTxtAsync(domain).catch(() => []);
     for (const recordArray of txtRecords) {
       const record = recordArray.join('');
       if (record.startsWith('v=spf1')) {
         result.spf.found = true;
         result.spf.record = record;
-        result.spf.status = 'valid'; // Simplistic status
+        result.spf.status = record.includes('~all') ? 'softfail_policy' : record.includes('-all') ? 'strict' : 'valid';
         break;
       }
     }
-    
-    // Lookup DMARC record
+
+    // DMARC
     const dmarcRecords = await resolveTxtAsync(`_dmarc.${domain}`).catch(() => []);
     for (const recordArray of dmarcRecords) {
       const record = recordArray.join('');
       if (record.startsWith('v=DMARC1')) {
         result.dmarc.found = true;
         result.dmarc.record = record;
-        result.dmarc.status = 'valid';
+        const pMatch = record.match(/p=([^;]+)/);
+        result.dmarc.policy = pMatch ? pMatch[1] : 'none';
+        result.dmarc.status = result.dmarc.policy === 'reject' ? 'strict' : result.dmarc.policy === 'quarantine' ? 'moderate' : 'weak';
         break;
       }
     }
+
+    // MX records
+    const mxRecords = await promisify(dns.resolveMx)(domain).catch(() => []);
+    if (mxRecords.length > 0) {
+      result.mx.found = true;
+      result.mx.records = mxRecords.map(r => r.exchange);
+    }
   } catch (error) {
-    // DNS resolution failure (domain might not exist or network issue)
+    // DNS resolution failure
   }
-  
+
   return result;
 }
 
 // Extract links from HTML/Text body and analyze them
 export function extractAndAnalyzeLinks(body, senderDomain) {
   const links = [];
-  
-  // HTML Link regex: <a href="url">text</a>
+  const seenUrls = new Set();
+
+  // HTML Link regex
   const htmlLinkRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match;
-  
-  const seenUrls = new Set();
-  
+
   while ((match = htmlLinkRegex.exec(body)) !== null) {
     const href = match[1].trim();
-    const anchorText = match[2].replace(/<[^>]+>/g, '').trim(); // Strip internal HTML tags
+    const anchorText = match[2].replace(/<[^>]+>/g, '').trim();
     seenUrls.add(href);
-    
-    links.push({
-      href,
-      anchorText,
-      isHtml: true
-    });
+    links.push({ href, anchorText, isHtml: true });
   }
-  
+
   // Plain text URL regex
   const textUrlRegex = /https?:\/\/[^\s<>'"]+/gi;
   while ((match = textUrlRegex.exec(body)) !== null) {
     const url = match[0].trim();
     if (!seenUrls.has(url)) {
-      links.push({
-        href: url,
-        anchorText: url,
-        isHtml: false
-      });
+      links.push({ href: url, anchorText: url, isHtml: false });
       seenUrls.add(url);
     }
   }
-  
-  // Analyze links
-  const analyzedLinks = links.map(link => {
+
+  return links.map(link => {
     const hrefInfo = extractDomainInfo(link.href);
     let misleading = false;
     let explanation = '';
-    
-    // Check if the anchor text itself looks like a URL but points to a different domain
-    if (/^https?:\/\//i.test(link.anchorText) || link.anchorText.includes('.')) {
+
+    if (/^https?:\/\//i.test(link.anchorText) || (link.anchorText.includes('.') && link.anchorText.length < 100)) {
       const anchorInfo = extractDomainInfo(link.anchorText);
       if (anchorInfo.domain && hrefInfo.domain && anchorInfo.domain !== hrefInfo.domain) {
         misleading = true;
         explanation = `Anchor text displays "${anchorInfo.domain}" but link goes to "${hrefInfo.domain}"`;
       }
     }
-    
-    // Check typosquatting on the destination domain
+
     const typoCheck = checkTyposquatting(hrefInfo.domain);
     const highRiskTld = HIGH_RISK_TLDS.has(hrefInfo.tld);
-    
+    const isWhitelisted = isWhitelistedDomain(hrefInfo.domain);
+
     return {
       ...link,
       domain: hrefInfo.domain,
       tld: hrefInfo.tld,
-      misleading,
+      misleading: misleading && !isWhitelisted,
       explanation,
-      typosquat: typoCheck,
+      typosquat: isWhitelisted ? { isSpoof: false } : typoCheck,
       highRiskTld
     };
   });
-  
-  return analyzedLinks;
 }
 
 // Analyze webpage HTML structure for credential harvesting fields & keywords
@@ -336,192 +470,194 @@ export function analyzeHtmlContent(html, domain) {
   const result = {
     hasPasswordInput: false,
     hasLoginForm: false,
+    hasEmailInput: false,
     keywordsFound: [],
-    strippedText: ''
+    brandKeywords: [],
+    strippedText: '',
+    formCount: 0
   };
-  
+
   if (!html) return result;
 
   const htmlLower = html.toLowerCase();
-  
+
   // Check for password input elements
-  if (htmlLower.includes('type="password"') || htmlLower.includes("type='password'") || 
-      htmlLower.includes('name="password"') || htmlLower.includes("name='password'")) {
+  if (htmlLower.includes('type="password"') || htmlLower.includes("type='password'") ||
+    htmlLower.includes('name="password"') || htmlLower.includes("name='password'") ||
+    htmlLower.includes('id="password"') || htmlLower.includes("id='password'")) {
     result.hasPasswordInput = true;
   }
-  
-  // Check for login/sign forms
-  if (htmlLower.includes('<form') && (htmlLower.includes('login') || htmlLower.includes('sign'))) {
+
+  // Check for email inputs
+  if (htmlLower.includes('type="email"') || htmlLower.includes("type='email'")) {
+    result.hasEmailInput = true;
+  }
+
+  // Count forms
+  const formMatches = htmlLower.match(/<form/g);
+  result.formCount = formMatches ? formMatches.length : 0;
+
+  // Login forms
+  if (result.formCount > 0 && (htmlLower.includes('login') || htmlLower.includes('sign in') || htmlLower.includes('signin'))) {
     result.hasLoginForm = true;
   }
-  
-  // Check for target brand and session keywords
-  const keywords = ['login', 'sign in', 'signin', 'fiverr', 'paypal', 'netflix', 'chase', 'authorize', 'verify your account', 'password'];
-  keywords.forEach(kw => {
-    if (htmlLower.includes(kw)) {
-      result.keywordsFound.push(kw);
-    }
+
+  // Check for brand and session keywords
+  const brandTargets = [
+    'fiverr', 'paypal', 'netflix', 'chase', 'amazon', 'microsoft', 'google',
+    'apple', 'instagram', 'facebook', 'twitter', 'linkedin', 'ebay', 'walmart',
+    'flipkart', 'hdfc', 'sbi', 'icici', 'axis bank', 'spotify', 'discord'
+  ];
+
+  const actionKeywords = ['login', 'sign in', 'signin', 'log in', 'password', 'authorize', 'verify your account', 'confirm your account', 'update payment'];
+
+  brandTargets.forEach(kw => {
+    if (htmlLower.includes(kw)) result.brandKeywords.push(kw);
+  });
+  actionKeywords.forEach(kw => {
+    if (htmlLower.includes(kw)) result.keywordsFound.push(kw);
   });
 
-  // Strip scripts, styles, and tags for text sentiment analysis
+  // Strip HTML for text analysis
   let text = html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-    
-  result.strippedText = text.substring(0, 5000);
+
+  result.strippedText = text.substring(0, 6000);
   return result;
 }
 
 // Local rules-based heuristic scoring engine (Fallback for Gemini AI)
-export function runLocalHeuristicAnalysis(text, isEmail = true, parsedHeaders = null) {
-  const alerts = [];
+export function runLocalHeuristicAnalysis(contextText, isEmail = true, parsedHeaders = null) {
   let score = 0;
-  
-  // Combine body and subject/from/reply-to headers if available for keyword scans
-  let scanText = text || '';
+  const alerts = [];
+
+  let scanText = contextText || '';
   if (parsedHeaders) {
     if (parsedHeaders.subject) scanText += ' ' + parsedHeaders.subject;
     if (parsedHeaders.from) scanText += ' ' + parsedHeaders.from;
     if (parsedHeaders['reply-to']) scanText += ' ' + parsedHeaders['reply-to'];
   }
   const textLower = scanText.toLowerCase();
-  
+
   // Urgency detection
   const urgencyKeywords = [
-    'immediate', 'suspend', 'disabled', 'unauthorized', 
-    'verify', 'locked', 'urgent', '24 hours', 'action required',
-    'close your', 'security alert', 'compromised', 'expire'
+    'immediate', 'suspend', 'suspended', 'disabled', 'unauthorized',
+    'verify', 'locked', 'urgent', '24 hours', '12 hours', 'action required',
+    'close your', 'security alert', 'compromised', 'expire', 'immediately',
+    'account will be', 'unusual activity', 'confirm your', 'restricted'
   ];
   let urgencyHits = 0;
   urgencyKeywords.forEach(kw => {
     if (textLower.includes(kw)) urgencyHits++;
   });
-  
-  const urgencyScore = Math.min(urgencyHits * 2, 10);
-  if (urgencyScore >= 4) {
-    alerts.push({
-      category: 'urgency',
-      title: 'Urgent Tone Detected',
-      description: `Found several urgency-inducing keywords. Phishing emails frequently pressure victims to act quickly.`,
-      severity: urgencyScore >= 7 ? 'high' : 'medium',
-      weight: urgencyScore * 2
-    });
-    score += urgencyScore * 2;
-  }
-  
+  const urgencyScore = Math.min(urgencyHits * 1.5, 10);
+
   // Impersonation detection
   let impersonationBrand = null;
   const brandKeywords = {
-    'netflix': ['netflix'],
-    'paypal': ['paypal'],
-    'chase': ['chase bank', 'chase online', 'chase'],
-    'microsoft': ['microsoft', 'office 365', 'outlook'],
-    'bank of america': ['bank of america', 'bofa'],
-    'amazon': ['amazon support', 'amazon prime', 'amazon'],
-    'fiverr': ['fiverr']
+    'Netflix': ['netflix'],
+    'PayPal': ['paypal'],
+    'Chase Bank': ['chase bank', 'chase online', 'chase'],
+    'Microsoft': ['microsoft', 'office 365', 'microsoft 365'],
+    'Bank of America': ['bank of america', 'bofa'],
+    'Amazon': ['amazon prime', 'amazon support', 'amazon order', 'amazon account'],
+    'Fiverr': ['fiverr'],
+    'Flipkart': ['flipkart'],
+    'Apple': ['apple id', 'icloud'],
+    'Google': ['google account', 'gmail account'],
+    'HDFC Bank': ['hdfc bank', 'hdfc'],
+    'SBI': ['state bank of india', 'sbi'],
+    'ICICI': ['icici bank', 'icici'],
   };
-  
+
   for (const [brand, kws] of Object.entries(brandKeywords)) {
     if (kws.some(kw => textLower.includes(kw))) {
       impersonationBrand = brand;
       break;
     }
   }
-  
+
   // Lures detection
   const lureTypes = [];
-  if (urgencyScore > 0) lureTypes.push('urgency');
-  if (textLower.includes('reward') || textLower.includes('prize') || textLower.includes('refund') || textLower.includes('invoice')) {
-    lureTypes.push('financial/greed');
-    alerts.push({
-      category: 'lure',
-      title: 'Financial Lure Detected',
-      description: 'Mentions rewards, prizes, refunds, or unexpected invoices, which are standard hooks to steal credentials or install malware.',
-      severity: 'medium',
-      weight: 15
-    });
-    score += 15;
+  if (urgencyScore >= 4) lureTypes.push('urgency');
+
+  let financialLure = false;
+  if (textLower.includes('reward') || textLower.includes('prize') || textLower.includes('refund') ||
+    textLower.includes('invoice') || textLower.includes('payment') || textLower.includes('subscription')) {
+    lureTypes.push('financial');
+    financialLure = true;
+    score += 10;
   }
-  
-  // Header anomalies (if email and headers are parsed)
+
+  // Header anomalies
   if (isEmail && parsedHeaders) {
     const fromAddr = extractEmailAddress(parsedHeaders['from'] || '');
     const replyToAddr = extractEmailAddress(parsedHeaders['reply-to'] || '');
     const returnPathAddr = extractEmailAddress(parsedHeaders['return-path'] || '');
-    
+
     const fromInfo = extractDomainInfo(fromAddr);
     const replyToInfo = extractDomainInfo(replyToAddr);
     const returnPathInfo = extractDomainInfo(returnPathAddr);
-    
+
     if (replyToAddr && fromInfo.domain && replyToInfo.domain && fromInfo.domain !== replyToInfo.domain) {
-      alerts.push({
-        category: 'header',
-        title: 'Reply-To Address Mismatch',
-        description: `Replies are routed to "${replyToAddr}" instead of sender domain "${fromInfo.domain}". This is highly indicative of spoofing.`,
-        severity: 'high',
-        weight: 25
-      });
       score += 25;
     }
-    
     if (returnPathAddr && fromInfo.domain && returnPathInfo.domain && fromInfo.domain !== returnPathInfo.domain) {
-      alerts.push({
-        category: 'header',
-        title: 'Return-Path Domain Mismatch',
-        description: `Bounces will be sent to "${returnPathAddr}" rather than the sender's apparent domain "${fromInfo.domain}".`,
-        severity: 'medium',
-        weight: 15
-      });
       score += 15;
     }
-    
-    // Check if brand mentioned in body matches from domain
     if (impersonationBrand && fromInfo.domain) {
-      const cleanBrandDomain = impersonationBrand.replace(/\s+/g, '') + '.com';
-      if (!fromInfo.domain.includes(impersonationBrand.replace(/\s+/g, ''))) {
-        alerts.push({
-          category: 'impersonation',
-          title: 'Brand Impersonation Detected',
-          description: `The email body references "${impersonationBrand}", but the sender domain is "${fromInfo.domain}".`,
-          severity: 'high',
-          weight: 30
-        });
+      const brandKey = impersonationBrand.toLowerCase().replace(/\s+/g, '');
+      if (!fromInfo.domain.includes(brandKey.substring(0, Math.min(brandKey.length, 6)))) {
         score += 30;
       }
     }
   }
-  
-  // Cap score to 100
+
+  // Add urgency to score
+  if (urgencyScore >= 4) score += urgencyScore * 2;
+
   score = Math.min(score, 100);
-  
+
+  // Build suspicious phrases list
+  const suspiciousPhrases = urgencyKeywords
+    .filter(kw => textLower.includes(kw))
+    .slice(0, 8)
+    .map(kw => ({ phrase: kw, category: 'urgency' }));
+
   return {
     urgency: {
       score: urgencyScore,
-      explanation: urgencyScore > 0 ? `Identified ${urgencyHits} urgent phrases in text.` : 'No critical urgency cues found.'
+      explanation: urgencyScore >= 4
+        ? `Found ${urgencyHits} urgency-inducing keywords like "suspend", "verify", "immediate action". High-pressure tactics are a hallmark of phishing.`
+        : 'No significant urgency cues found.'
     },
     impersonation: {
       detected: !!impersonationBrand,
       targetBrand: impersonationBrand || 'None',
-      explanation: impersonationBrand 
-        ? `Linguistic cues suggest impersonation of ${impersonationBrand}.`
-        : 'No specific brand impersonation detected in body text.'
+      explanation: impersonationBrand
+        ? `Linguistic cues and brand references strongly suggest impersonation of ${impersonationBrand}.`
+        : 'No specific brand impersonation detected in the content.'
     },
     lures: {
       types: lureTypes,
-      explanation: lureTypes.length > 0 ? `Psychological triggers identified: ${lureTypes.join(', ')}.` : 'No classic psychological triggers detected.'
+      explanation: lureTypes.length > 0
+        ? `Psychological triggers identified: ${lureTypes.join(', ')}. These manipulate victims into taking hasty action.`
+        : 'No classic psychological manipulation patterns detected.'
     },
-    suspicious_phrases: urgencyKeywords
-      .filter(kw => textLower.includes(kw))
-      .map(kw => ({ phrase: kw, category: 'urgency' })),
+    suspicious_phrases: suspiciousPhrases,
     overall_verdict: score >= 60 ? 'MALICIOUS' : (score >= 30 ? 'SUSPICIOUS' : 'SAFE'),
     ai_risk_score: score,
-    summary: score >= 60 
-      ? 'Heuristic analysis flags this content as highly suspicious with multiple indicators of phishing.'
-      : (score >= 30 ? 'Content contains some warning signs but no definitive proof of phishing.' : 'No major indicators of phishing detected.'),
-    alerts
+    summary: score >= 60
+      ? 'Local heuristic engine flags this as highly suspicious with multiple phishing indicators including urgency manipulation and potential brand impersonation.'
+      : (score >= 30
+        ? 'Some warning signs detected. Treat with caution and verify through official channels.'
+        : 'No major phishing indicators detected. Content appears relatively normal.'),
+    alerts,
+    isLocalFallback: true
   };
 }
 
@@ -529,15 +665,35 @@ export function runLocalHeuristicAnalysis(text, isEmail = true, parsedHeaders = 
 export function checkThreatDatabase(urlStr) {
   if (!urlStr) return null;
   const urlLower = urlStr.toLowerCase();
-  
+
   const THREAT_SIGNATURE_DB = [
     {
       pattern: 'flickshoot.com/project/vano',
       brand: 'Fiverr',
-      details: 'Active Fiverr credential harvesting campaign hosted on user portfolio platform (flickshoot.com).'
+      details: 'Active Fiverr credential harvesting campaign hosted on user portfolio platform flickshoot.com/project/vano. Page visually mimics Fiverr login.'
+    },
+    {
+      pattern: 'paypal-security-check',
+      brand: 'PayPal',
+      details: 'PayPal account security phishing URL using brand name with "security-check" suffix.'
+    },
+    {
+      pattern: 'netflix-billing-portal',
+      brand: 'Netflix',
+      details: 'Netflix billing phishing redirect portal.'
+    },
+    {
+      pattern: 'chase-security-restore',
+      brand: 'Chase',
+      details: 'Chase Bank account restore phishing portal.'
+    },
+    {
+      pattern: 'amazon-security-update',
+      brand: 'Amazon',
+      details: 'Amazon account security phishing update portal.'
     }
   ];
-  
+
   for (const item of THREAT_SIGNATURE_DB) {
     if (urlLower.includes(item.pattern)) {
       return item;

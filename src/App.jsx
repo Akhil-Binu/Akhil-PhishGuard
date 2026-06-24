@@ -90,6 +90,83 @@ Chase Bank, N.A.`,
   ]
 };
 
+// ===== Trusted domain database (mirrors server utils.js) =====
+const TRUSTED_BRAND_DOMAINS_CLIENT = {
+  google: ['google.com', 'google.co.in', 'google.co.uk', 'google.com.au', 'google.de', 'google.fr', 'googleapis.com', 'gstatic.com'],
+  youtube: ['youtube.com', 'youtu.be', 'youtube.co.in'],
+  facebook: ['facebook.com', 'fb.com', 'instagram.com'],
+  twitter: ['twitter.com', 'x.com'],
+  instagram: ['instagram.com'],
+  linkedin: ['linkedin.com'],
+  apple: ['apple.com', 'icloud.com'],
+  microsoft: ['microsoft.com', 'live.com', 'hotmail.com', 'outlook.com', 'bing.com', 'azure.com', 'microsoftonline.com'],
+  amazon: ['amazon.com', 'amazon.in', 'amazon.co.uk', 'amazon.de', 'amazon.fr', 'amazon.co.jp', 'amazon.com.au', 'amazonaws.com', 'amazon.ca'],
+  netflix: ['netflix.com'],
+  paypal: ['paypal.com', 'paypal.me'],
+  chase: ['chase.com'],
+  bankofamerica: ['bankofamerica.com'],
+  wellsfargo: ['wellsfargo.com'],
+  citibank: ['citibank.com', 'citi.com'],
+  yahoo: ['yahoo.com', 'yahoo.co.in', 'yahoo.co.uk'],
+  zoom: ['zoom.us', 'zoom.com'],
+  github: ['github.com', 'github.io'],
+  adobe: ['adobe.com'],
+  spotify: ['spotify.com'],
+  ebay: ['ebay.com', 'ebay.co.uk', 'ebay.in'],
+  walmart: ['walmart.com'],
+  fiverr: ['fiverr.com', 'fiverrcdn.com'],
+  flipkart: ['flipkart.com'],
+  wikipedia: ['wikipedia.org'],
+  reddit: ['reddit.com', 'redd.it'],
+  stackoverflow: ['stackoverflow.com'],
+  discord: ['discord.com', 'discord.gg'],
+  whatsapp: ['whatsapp.com'],
+  telegram: ['telegram.org', 't.me'],
+  sbi: ['sbi.co.in', 'onlinesbi.sbi'],
+  hdfc: ['hdfcbank.com'],
+  icici: ['icicibank.com'],
+};
+
+const ALL_TRUSTED_CLIENT = new Set();
+for (const domains of Object.values(TRUSTED_BRAND_DOMAINS_CLIENT)) {
+  domains.forEach(d => ALL_TRUSTED_CLIENT.add(d));
+}
+
+function isClientTrusted(domain) {
+  const d = domain.toLowerCase().replace(/^www\./, '');
+  if (ALL_TRUSTED_CLIENT.has(d)) return true;
+  for (const trusted of ALL_TRUSTED_CLIENT) {
+    if (d.endsWith('.' + trusted)) return true;
+  }
+  return false;
+}
+
+function clientCheckTyposquat(hostname) {
+  const domain = hostname.toLowerCase().replace(/^www\./, '');
+  if (isClientTrusted(domain)) return { isSpoof: false };
+
+  const parts = domain.split('.');
+  let registrable;
+  if (parts.length >= 3 && ['co', 'com', 'org', 'net', 'gov', 'edu', 'ac'].includes(parts[parts.length - 2])) {
+    registrable = parts[parts.length - 3];
+  } else {
+    registrable = parts[parts.length - 2];
+  }
+  if (!registrable) return { isSpoof: false };
+
+  const allBrandNames = Object.keys(TRUSTED_BRAND_DOMAINS_CLIENT);
+  for (const brand of allBrandNames) {
+    if (brand.length < 4) continue;
+    // Exact match on non-official TLD
+    if (registrable === brand) return { isSpoof: true, reason: `Exact brand name "${brand}" on non-official domain` };
+    // Contains brand with extra chars
+    if (registrable.includes(brand) && registrable !== brand) {
+      return { isSpoof: true, reason: `Contains brand "${brand}" with modifications in "${domain}"` };
+    }
+  }
+  return { isSpoof: false };
+}
+
 // Client-side Heuristic Sandbox (used if Backend is Offline)
 function runOfflineHeuristic(input, mode) {
   const scoreBase = { score: 0, indicators: [], verdict: 'SAFE' };
@@ -112,13 +189,9 @@ function runOfflineHeuristic(input, mode) {
     
     let isTyposquat = false;
     let brandReason = '';
-    const brands = ['paypal', 'netflix', 'chase', 'google', 'microsoft', 'amazon', 'fiverr'];
-    brands.forEach(b => {
-      if (hostname.includes(b) && hostname !== `${b}.com` && hostname !== `www.${b}.com`) {
-        isTyposquat = true;
-        brandReason = `Contains brand name "${b}" but is not the legitimate domain.`;
-      }
-    });
+    const typoResult = clientCheckTyposquat(hostname);
+    isTyposquat = typoResult.isSpoof;
+    brandReason = typoResult.reason || '';
 
     let score = 0;
     const indicators = [];
@@ -229,27 +302,8 @@ function runOfflineHeuristic(input, mode) {
       score += 35;
     }
     
-    // Whitelist check: override heuristics on globally reputable domains
-    const POPULAR_DOMAINS_SET = new Set([
-      'google.com', 'google.co.in', 'youtube.com', 'facebook.com', 'twitter.com', 'instagram.com', 
-      'linkedin.com', 'apple.com', 'microsoft.com', 'amazon.com', 'netflix.com', 
-      'paypal.com', 'chase.com', 'bankofamerica.com', 'wellsfargo.com', 'citibank.com', 
-      'yahoo.com', 'gmail.com', 'outlook.com', 'zoom.us', 'salesforce.com', 
-      'github.com', 'adobe.com', 'spotify.com', 'ebay.com', 'walmart.com', 
-      'fiverr.com', 'flipkart.com', 'wikipedia.org', 'reddit.com', 'stackoverflow.com'
-    ]);
-
-    const cleanHost = hostname.replace(/^www\./i, '');
-    if (POPULAR_DOMAINS_SET.has(cleanHost)) {
-      score = 0;
-      indicators.length = 0;
-    }
-
-    if (url.includes('flipkart.com')) {
-      redirectChain.length = 0;
-      redirectChain.push({ url: 'http://flipkart.com', status: 301 });
-      redirectChain.push({ url: 'https://flipkart.com:443/', status: 301 });
-      redirectChain.push({ url: 'https://www.flipkart.com/', status: 200 });
+    // Whitelist check: if trusted domain, clear false positives
+    if (isClientTrusted(hostname)) {
       score = 0;
       indicators.length = 0;
     }
@@ -879,7 +933,141 @@ function App() {
             {/* Tab: AI Insights */}
             {activeReportTab === 'ai' && (
               <div className="ai-analysis-grid">
+                {/* Simulation warning */}
+                {result.isSimulated && (
+                  <div className="glass-panel" style={{ gridColumn: '1 / -1', padding: '12px 20px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.3)', borderRadius: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '1.2rem' }}>⚠️</span>
+                    <div>
+                      <strong style={{ color: 'var(--accent-yellow, #ffaa00)' }}>Simulated Analysis Mode</strong>
+                      <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: '2px 0 0' }}>Gemini AI was unavailable or no API key provided. Results are from the local heuristic engine. Add a Gemini API key in Settings for full AI-powered analysis.</p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="glass-panel ai-card">
+                  <h3>🧠 Behavioral Scans</h3>
+                  <div className="metric-bar-container">
+                    <div className="metric-header">
+                      <span>Urgency level (0-10)</span>
+                      <span>{result.aiAnalysis?.urgency?.score ?? 0}/10</span>
+                    </div>
+                    <div className="metric-bar-bg">
+                      <div
+                        className={`metric-bar-fill ${(result.aiAnalysis?.urgency?.score ?? 0) >= 7 ? 'high' : ''}`}
+                        style={{ width: `${(result.aiAnalysis?.urgency?.score ?? 0) * 10}%` }}
+                      ></div>
+                    </div>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '8px' }}>
+                      {result.aiAnalysis?.urgency?.explanation || 'No urgency analysis available.'}
+                    </p>
+                  </div>
+
+                  {/* AI Risk Score */}
+                  <div className="metric-bar-container" style={{ marginTop: '18px' }}>
+                    <div className="metric-header">
+                      <span>AI Risk Score</span>
+                      <span>{result.aiAnalysis?.ai_risk_score ?? '—'}/100</span>
+                    </div>
+                    <div className="metric-bar-bg">
+                      <div
+                        className={`metric-bar-fill ${
+                          (result.aiAnalysis?.ai_risk_score ?? 0) >= 60 ? 'high' :
+                          (result.aiAnalysis?.ai_risk_score ?? 0) >= 30 ? '' : ''
+                        }`}
+                        style={{
+                          width: `${result.aiAnalysis?.ai_risk_score ?? 0}%`,
+                          background: (result.aiAnalysis?.ai_risk_score ?? 0) >= 60
+                            ? 'var(--accent-red)'
+                            : (result.aiAnalysis?.ai_risk_score ?? 0) >= 30
+                            ? 'var(--accent-yellow, #ffaa00)'
+                            : 'var(--accent-green)'
+                        }}
+                      ></div>
+                    </div>
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '6px' }}>
+                      AI Verdict: <strong style={{ color: result.aiAnalysis?.overall_verdict === 'MALICIOUS' ? 'var(--accent-red)' : result.aiAnalysis?.overall_verdict === 'SUSPICIOUS' ? 'var(--accent-yellow, #ffaa00)' : 'var(--accent-green)' }}>{result.aiAnalysis?.overall_verdict || '—'}</strong>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="glass-panel ai-card">
+                  <h3>🛡 Brand Integrity</h3>
+                  <p style={{ fontWeight: '500', marginBottom: '6px' }}>
+                    Impersonation Check:{' '}
+                    <span style={{ color: result.aiAnalysis?.impersonation?.detected ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                      {result.aiAnalysis?.impersonation?.detected ? `⚠ Spoofing Detected` : `✓ Appears Legitimate`}
+                    </span>
+                  </p>
+                  {result.aiAnalysis?.impersonation?.detected && (
+                    <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                      <strong>Impersonating:</strong> {result.aiAnalysis?.impersonation?.targetBrand || 'Unknown Brand'}
+                    </p>
+                  )}
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '15px' }}>
+                    {result.aiAnalysis?.impersonation?.explanation || 'No impersonation analysis available.'}
+                  </p>
+
+                  <div>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Identified Lures:</span>
+                    <div className="lures-list">
+                      {result.aiAnalysis?.lures?.types && result.aiAnalysis?.lures?.types.length > 0 ? (
+                        result.aiAnalysis.lures.types.map((lure, idx) => (
+                          <span key={idx} className="lure-tag">
+                            {lure}
+                          </span>
+                        ))
+                      ) : (
+                        <span style={{ fontSize: '0.85rem', color: 'var(--accent-green)' }}>✓ None detected</span>
+                      )}
+                    </div>
+                    {result.aiAnalysis?.lures?.explanation && (
+                      <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+                        {result.aiAnalysis.lures.explanation}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* AI Summary Card */}
+                {result.aiAnalysis?.summary && (
+                  <div className="glass-panel" style={{ gridColumn: '1 / -1', padding: '20px' }}>
+                    <h3 style={{ marginBottom: '10px' }}>📋 AI Analysis Summary</h3>
+                    <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                      {result.aiAnalysis.summary}
+                    </p>
+                    {result.aiAnalysis?.suspicious_phrases && result.aiAnalysis.suspicious_phrases.length > 0 && (
+                      <div style={{ marginTop: '15px' }}>
+                        <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', display: 'block', marginBottom: '8px' }}>Suspicious Phrases Flagged:</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                          {result.aiAnalysis.suspicious_phrases.map((p, idx) => (
+                            <span key={idx} style={{ background: 'rgba(255,60,60,0.15)', border: '1px solid rgba(255,60,60,0.3)', borderRadius: '6px', padding: '3px 10px', fontSize: '0.82rem', color: 'var(--accent-red)' }}>
+                              {p.phrase} <span style={{ opacity: 0.6, fontSize: '0.75rem' }}>({p.category})</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Email Body Highlighter */}
+                {mode === 'email' && (
+                  <div className="glass-panel email-body-card" style={{ gridColumn: '1 / -1' }}>
+                    <h3>✉ Analyzed Email Body (Linguistic Highlights)</h3>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '10px' }}>
+                      <span style={{ background: 'rgba(255,60,60,0.2)', padding: '2px 6px', borderRadius: '4px' }}>Red</span> = Urgency demands &nbsp;
+                      <span style={{ background: 'rgba(255,200,0,0.2)', padding: '2px 6px', borderRadius: '4px' }}>Yellow</span> = Suspicious actions/anchors
+                    </p>
+                    <div className="email-body-content">
+                      {renderHighlightedBody(
+                        inputValue.split('\n\n').slice(1).join('\n\n') || inputValue,
+                        result.aiAnalysis?.suspicious_phrases || []
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
                   <h3>🧠 Behavioral Scans</h3>
                   <div className="metric-bar-container">
                     <div className="metric-header">
@@ -954,27 +1142,39 @@ function App() {
               <div className="tech-split">
                 {mode === 'url' ? (
                   <>
-                    {/* URL Redirections Hops */}
+                    {/* URL Redirect Chain */}
                     <div className="glass-panel tech-panel">
                       <h3>⇄ Redirection Chain Tracker</h3>
-                      <div className="redirect-chain">
-                        {result.redirectChain?.map((hop, idx) => (
-                          <div 
-                            key={idx} 
-                            className={`redirect-hop ${idx === result.redirectChain.length - 1 && result.domainInfo?.domain !== result.redirectChain[0].url.split('/')[2] ? 'has-danger' : ''}`}
-                          >
-                            <div className="hop-node">{idx + 1}</div>
-                            <div className="hop-details">
-                              <div className="hop-url">{hop.url}</div>
-                              <div className="hop-meta">
-                                <span className={`hop-status-code ${hop.status >= 300 && hop.status < 400 ? 'status-redirect' : 'status-ok'}`}>
-                                  HTTP {hop.status}
-                                </span>
+                      {result.redirectChain && result.redirectChain.length > 0 ? (
+                        <div className="redirect-chain">
+                          {result.redirectChain.map((hop, idx) => {
+                            const isLast = idx === result.redirectChain.length - 1;
+                            const statusNum = parseInt(hop.status);
+                            const isRedirect = statusNum >= 300 && statusNum < 400;
+                            const isError = hop.status === 'Error' || hop.status === 'Timeout' || hop.error;
+                            return (
+                              <div
+                                key={idx}
+                                className={`redirect-hop ${isError ? 'has-danger' : ''}`}
+                              >
+                                <div className="hop-node" style={{ background: isError ? 'var(--accent-red)' : isLast ? 'var(--accent-green)' : 'var(--accent-blue, #5b9bd5)' }}>{idx + 1}</div>
+                                <div className="hop-details">
+                                  <div className="hop-url">{hop.url}</div>
+                                  <div className="hop-meta">
+                                    <span className={`hop-status-code ${isRedirect ? 'status-redirect' : isError ? 'status-error' : 'status-ok'}`}>
+                                      {isError ? `⚠ ${hop.status}` : `HTTP ${hop.status}`}
+                                    </span>
+                                    {isLast && <span style={{ fontSize: '0.75rem', color: 'var(--accent-green)', marginLeft: '8px' }}>← Final Destination</span>}
+                                    {hop.error && <span style={{ fontSize: '0.75rem', color: 'var(--accent-red)', marginLeft: '8px', display: 'block' }}>{hop.error}</span>}
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', padding: '20px 0' }}>No redirect chain data available (offline mode).</p>
+                      )}
                     </div>
 
                     {/* Domain & Reputation Details */}
@@ -986,7 +1186,7 @@ function App() {
                             <span className="auth-icon">💻</span>
                             <span className="auth-label">Hostname</span>
                           </div>
-                          <span className="auth-val">{result.domainInfo?.hostname}</span>
+                          <span className="auth-val">{result.domainInfo?.hostname || result.domainInfo?.domain || '—'}</span>
                         </div>
 
                         <div className="auth-row">
@@ -994,16 +1194,36 @@ function App() {
                             <span className="auth-icon">🌍</span>
                             <span className="auth-label">Top Level Domain</span>
                           </div>
-                          <span className="auth-val">{result.domainInfo?.tld}</span>
+                          <span className="auth-val">{result.domainInfo?.tld || '—'}</span>
                         </div>
+
+                        {result.finalDomainInfo && result.finalDomainInfo.domain !== result.domainInfo?.domain && (
+                          <div className="auth-row">
+                            <div className="auth-label-wrap">
+                              <span className="auth-icon">🏁</span>
+                              <span className="auth-label">Final Landing Domain</span>
+                            </div>
+                            <span className="auth-val">{result.finalDomainInfo.domain}</span>
+                          </div>
+                        )}
 
                         <div className="auth-row">
                           <div className="auth-label-wrap">
                             <span className="auth-icon">🔒</span>
                             <span className="auth-label">Security Protocol</span>
                           </div>
-                          <span className={`dns-badge ${result.domainInfo?.protocol === 'https:' ? 'dns-badge-pass' : 'dns-badge-fail'}`}>
+                          <span className={`dns-badge ${(result.domainInfo?.protocol === 'https:' || result.finalUrl?.startsWith('https')) ? 'dns-badge-pass' : 'dns-badge-fail'}`}>
                             {result.domainInfo?.protocol?.toUpperCase() || 'HTTP:'}
+                          </span>
+                        </div>
+
+                        <div className="auth-row">
+                          <div className="auth-label-wrap">
+                            <span className="auth-icon">🔍</span>
+                            <span className="auth-label">Trusted Domain</span>
+                          </div>
+                          <span className={`dns-badge ${result.isOriginalTrusted || result.isFinalTrusted ? 'dns-badge-pass' : 'dns-badge-warn'}`}>
+                            {result.isOriginalTrusted || result.isFinalTrusted ? '✓ Verified Trusted' : '⚠ Unverified'}
                           </span>
                         </div>
 
@@ -1012,31 +1232,64 @@ function App() {
                             <span className="auth-icon">⚠️</span>
                             <span className="auth-label">Spoofing Detection</span>
                           </div>
-                          <span className={`dns-badge ${result.typosquat?.isSpoof ? 'dns-badge-fail' : 'dns-badge-pass'}`}>
-                            {result.typosquat?.isSpoof ? 'Spoofed brand' : 'Legitimate'}
-                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                            <span className={`dns-badge ${result.typosquat?.isSpoof ? 'dns-badge-fail' : 'dns-badge-pass'}`}>
+                              {result.typosquat?.isSpoof ? '⚠ Spoofed Brand' : '✓ Clean'}
+                            </span>
+                            {result.typosquat?.reason && (
+                              <span style={{ fontSize: '0.75rem', color: 'var(--accent-red)', textAlign: 'right', maxWidth: '200px' }}>
+                                {result.typosquat.reason}
+                              </span>
+                            )}
+                          </div>
                         </div>
+
+                        {result.pageAnalysis && (
+                          <>
+                            <div className="auth-row">
+                              <div className="auth-label-wrap">
+                                <span className="auth-icon">🔑</span>
+                                <span className="auth-label">Password Form</span>
+                              </div>
+                              <span className={`dns-badge ${result.pageAnalysis.hasPasswordInput ? 'dns-badge-fail' : 'dns-badge-pass'}`}>
+                                {result.pageAnalysis.hasPasswordInput ? '⚠ Detected' : '✓ Not Found'}
+                              </span>
+                            </div>
+                            {result.pageAnalysis.brandKeywords && result.pageAnalysis.brandKeywords.length > 0 && (
+                              <div className="auth-row">
+                                <div className="auth-label-wrap">
+                                  <span className="auth-icon">🏷</span>
+                                  <span className="auth-label">Brand References</span>
+                                </div>
+                                <span style={{ fontSize: '0.82rem', color: 'var(--accent-red)', fontWeight: '600' }}>
+                                  {result.pageAnalysis.brandKeywords.join(', ')}
+                                </span>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </div>
                     </div>
+
                     {/* Webpage Visual Capture */}
                     {result.screenshot && (
                       <div className="glass-panel tech-panel" style={{ gridColumn: '1 / -1' }}>
                         <h3>📸 Webpage Visual Capture (Multimodal Vision Engine)</h3>
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '15px' }}>
-                          This screenshot was captured in real-time by our scanner and processed by Gemini AI Vision.
+                          Real-time screenshot captured by scanner and analyzed by Gemini AI Vision for visual brand impersonation.
                         </p>
                         <div style={{ display: 'flex', justifyContent: 'center' }}>
-                          <img 
-                            src={result.screenshot} 
-                            alt="Webpage Screenshot Capture" 
-                            style={{ 
-                              maxWidth: '100%', 
-                              maxHeight: '450px',
-                              borderRadius: '8px', 
+                          <img
+                            src={result.screenshot}
+                            alt="Webpage Screenshot Capture"
+                            style={{
+                              maxWidth: '100%',
+                              maxHeight: '500px',
+                              borderRadius: '8px',
                               border: '1px solid var(--border-color)',
                               boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
                               objectFit: 'contain'
-                            }} 
+                            }}
                           />
                         </div>
                       </div>
@@ -1051,27 +1304,37 @@ function App() {
                         <div className="auth-row">
                           <div className="auth-label-wrap">
                             <span className="auth-icon">📧</span>
-                            <span className="auth-label">From Domain</span>
+                            <span className="auth-label">From Header</span>
                           </div>
-                          <span className="auth-val">{result.headersParsed?.from || 'Unknown'}</span>
+                          <span className="auth-val" style={{ maxWidth: '55%', wordBreak: 'break-all' }}>{result.headersParsed?.from || 'Unknown'}</span>
                         </div>
 
                         <div className="auth-row">
                           <div className="auth-label-wrap">
                             <span className="auth-icon">↩</span>
-                            <span className="auth-label">Reply-To Domain</span>
+                            <span className="auth-label">Reply-To</span>
                           </div>
-                          <span className="auth-val">{result.headersParsed?.['reply-to'] || 'None'}</span>
+                          <span className="auth-val" style={{ maxWidth: '55%', wordBreak: 'break-all' }}>{result.headersParsed?.['reply-to'] || 'Not Set'}</span>
+                        </div>
+
+                        <div className="auth-row">
+                          <div className="auth-label-wrap">
+                            <span className="auth-icon">↪</span>
+                            <span className="auth-label">Return-Path</span>
+                          </div>
+                          <span className="auth-val" style={{ maxWidth: '55%', wordBreak: 'break-all' }}>{result.headersParsed?.['return-path'] || 'Not Set'}</span>
                         </div>
 
                         <div className="auth-row">
                           <div className="auth-label-wrap">
                             <span className="auth-icon">🛡️</span>
-                            <span className="auth-label">SPF Check</span>
+                            <span className="auth-label">SPF Record</span>
                           </div>
-                          <span className={`dns-badge ${result.dnsCheck?.spf?.found ? 'dns-badge-pass' : 'dns-badge-fail'}`}>
-                            {result.dnsCheck?.spf?.found ? 'PASS' : 'FAIL/MISSING'}
-                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                            <span className={`dns-badge ${result.dnsCheck?.spf?.found ? 'dns-badge-pass' : (result.dnsCheck ? 'dns-badge-fail' : 'dns-badge-warn')}`}>
+                              {result.dnsCheck?.spf?.found ? `✓ PASS (${result.dnsCheck.spf.status || 'valid'})` : (result.dnsCheck ? '✗ MISSING' : '— N/A')}
+                            </span>
+                          </div>
                         </div>
 
                         <div className="auth-row">
@@ -1079,38 +1342,57 @@ function App() {
                             <span className="auth-icon">🔏</span>
                             <span className="auth-label">DMARC Policy</span>
                           </div>
-                          <span className={`dns-badge ${result.dnsCheck?.dmarc?.found ? 'dns-badge-pass' : 'dns-badge-fail'}`}>
-                            {result.dnsCheck?.dmarc?.found ? 'PASS' : 'FAIL/MISSING'}
-                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                            <span className={`dns-badge ${result.dnsCheck?.dmarc?.found ? (result.dnsCheck.dmarc.policy === 'reject' ? 'dns-badge-pass' : 'dns-badge-warn') : (result.dnsCheck ? 'dns-badge-fail' : 'dns-badge-warn')}`}>
+                              {result.dnsCheck?.dmarc?.found
+                                ? `✓ ${result.dnsCheck.dmarc.policy?.toUpperCase() || 'PASS'}`
+                                : (result.dnsCheck ? '✗ MISSING' : '— N/A')}
+                            </span>
+                            {result.dnsCheck?.dmarc?.found && result.dnsCheck.dmarc.record && (
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', maxWidth: '200px', wordBreak: 'break-all', textAlign: 'right' }}>
+                                {result.dnsCheck.dmarc.record.substring(0, 80)}{result.dnsCheck.dmarc.record.length > 80 ? '...' : ''}
+                              </span>
+                            )}
+                          </div>
                         </div>
+
+                        {result.dnsCheck?.mx?.found && (
+                          <div className="auth-row">
+                            <div className="auth-label-wrap">
+                              <span className="auth-icon">📮</span>
+                              <span className="auth-label">MX Records</span>
+                            </div>
+                            <span className="dns-badge dns-badge-pass">✓ {result.dnsCheck.mx.records.length} Found</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
-                    {/* Hyperlink Domain Alignments */}
+                    {/* Hyperlink Domain Analyzer */}
                     <div className="glass-panel tech-panel">
-                      <h3>🔗 Hyperlinked Node Analyzer</h3>
+                      <h3>🔗 Hyperlinked URL Analyzer</h3>
                       <div className="tech-links-list">
                         {result.linksAnalyzed && result.linksAnalyzed.length > 0 ? (
                           result.linksAnalyzed.map((link, idx) => (
-                            <div key={idx} className={`tech-link-card ${link.misleading || link.typosquat?.isSpoof ? 'warning' : ''}`}>
+                            <div key={idx} className={`tech-link-card ${link.misleading || link.typosquat?.isSpoof || link.highRiskTld ? 'warning' : ''}`}>
                               <div className="link-row">
                                 <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Visible Text:</span>
-                                <span className="link-anchor">{link.anchorText}</span>
-                                
-                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>Actual Target URL:</span>
+                                <span className="link-anchor">{link.anchorText || '(no anchor text)'}</span>
+
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>Actual URL:</span>
                                 <span className="link-href">{link.href}</span>
-                                
-                                {(link.misleading || link.typosquat?.isSpoof) && (
-                                  <span className="link-alert">
-                                    ⚠ Warning: {link.explanation || 'Redirects to a typosquatted domain.'}
-                                  </span>
-                                )}
+
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px' }}>
+                                  {link.misleading && <span className="link-alert">⚠ Misleading: {link.explanation}</span>}
+                                  {link.typosquat?.isSpoof && !link.misleading && <span className="link-alert">⚠ Typosquatted domain: {link.typosquat.reason}</span>}
+                                  {link.highRiskTld && <span style={{ fontSize: '0.75rem', background: 'rgba(255,170,0,0.15)', border: '1px solid rgba(255,170,0,0.3)', borderRadius: '5px', padding: '2px 8px', color: 'var(--accent-yellow, #ffaa00)' }}>⚠ High-risk TLD: {link.tld}</span>}
+                                </div>
                               </div>
                             </div>
                           ))
                         ) : (
                           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', marginTop: '20px' }}>
-                            No active links extracted from email body.
+                            No hyperlinks extracted from email body.
                           </p>
                         )}
                       </div>
