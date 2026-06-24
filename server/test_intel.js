@@ -14,6 +14,9 @@ try {
     console.log(`- Verdict: ${data.verdict}`);
     console.log(`- Aggregated Risk Score: ${data.score}`);
     console.log(`- Indicators Found: ${JSON.stringify(data.indicators.map(i => i.title))}`);
+    console.log(`- AI Urgency Rating: ${data.aiAnalysis?.urgency?.score}/10`);
+    console.log(`- AI Impersonation Brand: ${data.aiAnalysis?.impersonation?.targetBrand}`);
+    console.log(`- AI Impersonation Flagged: ${data.aiAnalysis?.impersonation?.detected}`);
     
     if (data.verdict === 'MALICIOUS' && data.score >= 90) {
       console.log('\n🎉 PASS: Phishing URL correctly discovered and scored by API server!');

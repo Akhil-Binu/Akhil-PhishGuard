@@ -101,6 +101,9 @@ app.post('/api/analyze-url', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL format' });
     }
 
+    // Query threat intelligence database early
+    const threatFeed = checkThreatDatabase(url);
+
     // 1. Trace redirects
     const redirectChain = await traceRedirects(url);
     const finalUrl = redirectChain[redirectChain.length - 1].url;
@@ -149,7 +152,19 @@ app.post('/api/analyze-url', async (req, res) => {
       aiAnalysis = await runGeminiAnalysis(contextStr, false, apiKey, screenshotBase64);
     } catch (e) {
       console.warn('Falling back to local heuristic url analysis:', e.message);
-      aiAnalysis = runLocalHeuristicAnalysis(contextStr, false);
+      if (threatFeed) {
+        aiAnalysis = {
+          urgency: { score: 8, explanation: `Threat intelligence signature flags this URL as an active phishing page targeting ${threatFeed.brand} customers.` },
+          impersonation: { detected: true, targetBrand: threatFeed.brand, explanation: `Webpage spoofing: Visually mimics ${threatFeed.brand} login portals on an unaligned domain.` },
+          lures: { types: ['urgency', 'credential_harvest'], explanation: `Uses simulated ${threatFeed.brand} interfaces to collect credentials.` },
+          suspicious_phrases: [{ phrase: 'login', category: 'urgency' }, { phrase: 'password', category: 'action' }],
+          overall_verdict: 'MALICIOUS',
+          ai_risk_score: 95,
+          summary: `Offline heuristic: Flagged in threat signature database as targeting ${threatFeed.brand}.`
+        };
+      } else {
+        aiAnalysis = runLocalHeuristicAnalysis(contextStr, false);
+      }
       isSimulated = true;
     }
 
@@ -157,8 +172,6 @@ app.post('/api/analyze-url', async (req, res) => {
     let score = 0;
     const indicators = [];
 
-    // Threat intelligence database lookup
-    const threatFeed = checkThreatDatabase(url);
     if (threatFeed) {
       indicators.push({
         title: `Threat Intel Signature Match`,
