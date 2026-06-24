@@ -43,6 +43,7 @@ const TRUSTED_BRAND_DOMAINS = {
   nvidia: ['nvidia.com'],
   intel: ['intel.com'],
   amd: ['amd.com'],
+  myntra: ['myntra.com'],
   samsung: ['samsung.com'],
   sony: ['sony.com'],
   apple: ['apple.com'],
@@ -572,10 +573,11 @@ export function runLocalHeuristicAnalysis(contextText, isEmail = true, parsedHea
     'HDFC Bank': ['hdfc bank', 'hdfc'],
     'SBI': ['state bank of india', 'sbi'],
     'ICICI': ['icici bank', 'icici'],
+    'Myntra': ['myntra'],
   };
 
   for (const [brand, kws] of Object.entries(brandKeywords)) {
-    if (kws.some(kw => textLower.includes(kw))) {
+    if (kws.some(kw => new RegExp(`\\b${kw}\\b`, 'i').test(textLower))) {
       impersonationBrand = brand;
       break;
     }

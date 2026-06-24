@@ -125,6 +125,7 @@ const TRUSTED_BRAND_DOMAINS_CLIENT = {
   sbi: ['sbi.co.in', 'onlinesbi.sbi'],
   hdfc: ['hdfcbank.com'],
   icici: ['icicibank.com'],
+  myntra: ['myntra.com'],
 };
 
 const ALL_TRUSTED_CLIENT = new Set();
