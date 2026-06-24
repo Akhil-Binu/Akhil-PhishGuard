@@ -260,7 +260,7 @@ function runOfflineHeuristic(input, mode) {
     let aiImpersonation = false;
     let targetBrand = 'None';
     
-    if (url.includes('paypal') || url.includes('billing')) {
+    if (url.includes('paypal-security') || url.includes('billing-update')) {
       aiUrgency = 7;
       aiImpersonation = true;
       targetBrand = 'PayPal';
@@ -458,7 +458,7 @@ function runOfflineHeuristic(input, mode) {
     if (bodyLower.includes('suspend') || bodyLower.includes('lock') || bodyLower.includes('immediate')) {
       aiUrgency = bodyLower.includes('chase') ? 9 : 8;
     }
-    if (bodyLower.includes('netflix')) {
+    if (bodyLower.includes('netflix account') || bodyLower.includes('netflix login')) {
       aiImpersonation = true;
       targetBrand = 'Netflix';
     } else if (bodyLower.includes('chase bank') || bodyLower.includes('chase online')) {

@@ -560,20 +560,20 @@ export function runLocalHeuristicAnalysis(contextText, isEmail = true, parsedHea
   // Impersonation detection
   let impersonationBrand = null;
   const brandKeywords = {
-    'Netflix': ['netflix'],
-    'PayPal': ['paypal'],
+    'Netflix': ['netflix account', 'netflix login', 'netflix verify', 'netflix support'],
+    'PayPal': ['paypal account', 'paypal login', 'paypal verify', 'paypal support'],
     'Chase Bank': ['chase bank', 'chase online', 'jpmorgan chase'],
-    'Microsoft': ['microsoft', 'office 365', 'microsoft 365'],
+    'Microsoft': ['microsoft account', 'office 365', 'microsoft 365', 'microsoft login'],
     'Bank of America': ['bank of america', 'bofa'],
     'Amazon': ['amazon prime', 'amazon support', 'amazon order', 'amazon account'],
-    'Fiverr': ['fiverr'],
-    'Flipkart': ['flipkart'],
-    'Apple': ['apple id', 'icloud'],
-    'Google': ['google account', 'gmail account'],
-    'HDFC Bank': ['hdfc bank', 'hdfc'],
-    'SBI': ['state bank of india', 'sbi'],
-    'ICICI': ['icici bank', 'icici'],
-    'Myntra': ['myntra'],
+    'Fiverr': ['fiverr account', 'fiverr login', 'fiverr support'],
+    'Flipkart': ['flipkart account', 'flipkart login', 'flipkart support'],
+    'Apple': ['apple id', 'icloud', 'apple login'],
+    'Google': ['google account', 'gmail account', 'google login'],
+    'HDFC Bank': ['hdfc bank', 'hdfc login', 'hdfc online'],
+    'SBI': ['state bank of india', 'sbi online', 'sbi login'],
+    'ICICI': ['icici bank', 'icici login', 'icici online'],
+    'Myntra': ['myntra account', 'myntra login', 'myntra support'],
   };
 
   for (const [brand, kws] of Object.entries(brandKeywords)) {
