@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import './App.css';
 
 // Predefined examples to auto-fill
@@ -626,7 +627,7 @@ function App() {
               className={`tab-btn ${mode === 'url' ? 'active' : ''}`}
               onClick={() => { setMode('url'); setInputValue(''); }}
             >
-              🔗 URL Analyzer
+              �� URL Analyzer
             </button>
             <button 
               id="tab-mode-email"
@@ -1101,6 +1102,7 @@ function App() {
           </section>
         </main>
       )}
+      <Analytics />
     </div>
   );
 }
