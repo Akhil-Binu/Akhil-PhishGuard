@@ -194,6 +194,8 @@ function runOfflineHeuristic(input, mode) {
       aiUrgency = 6;
       aiImpersonation = true;
       targetBrand = 'Fiverr';
+      isTyposquat = true;
+      brandReason = 'Webpage mimics Fiverr design templates on unaligned domain "flickshoot.com"';
       
       // Simulate credential harvesting discovery on page fetch
       indicators.push({

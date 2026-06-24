@@ -293,13 +293,27 @@ app.post('/api/analyze-url', async (req, res) => {
     if (score >= 60) verdict = 'MALICIOUS';
     else if (score >= 30) verdict = 'SUSPICIOUS';
 
+    const isSpoofed = typosquat.isSpoof || finalTyposquat.isSpoof || !!threatFeed || (aiAnalysis && aiAnalysis.impersonation && aiAnalysis.impersonation.detected);
+    const spoofInfo = {
+      isSpoof: isSpoofed,
+      reason: typosquat.isSpoof 
+        ? typosquat.reason 
+        : (finalTyposquat.isSpoof 
+            ? finalTyposquat.reason 
+            : (threatFeed 
+                ? `Threat Intel: Spoofing "${threatFeed.brand}" brand templates` 
+                : (aiAnalysis?.impersonation?.detected 
+                    ? `Impersonating brand "${aiAnalysis.impersonation.targetBrand}"` 
+                    : '')))
+    };
+
     res.json({
       success: true,
       url,
       domainInfo,
       redirectChain,
       finalUrl,
-      typosquat,
+      typosquat: spoofInfo,
       aiAnalysis,
       isSimulated,
       score,
