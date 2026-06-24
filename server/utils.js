@@ -562,7 +562,7 @@ export function runLocalHeuristicAnalysis(contextText, isEmail = true, parsedHea
   const brandKeywords = {
     'Netflix': ['netflix'],
     'PayPal': ['paypal'],
-    'Chase Bank': ['chase bank', 'chase online', 'chase'],
+    'Chase Bank': ['chase bank', 'chase online', 'jpmorgan chase'],
     'Microsoft': ['microsoft', 'office 365', 'microsoft 365'],
     'Bank of America': ['bank of america', 'bofa'],
     'Amazon': ['amazon prime', 'amazon support', 'amazon order', 'amazon account'],

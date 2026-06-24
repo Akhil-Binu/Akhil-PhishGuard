@@ -459,6 +459,14 @@ app.post('/api/analyze-url', async (req, res) => {
     if (isOriginalTrusted && isFinalTrusted) {
       score = 0;
       indicators.length = 0;
+      if (aiAnalysis && aiAnalysis.isLocalFallback) {
+        aiAnalysis.urgency.score = 0;
+        aiAnalysis.impersonation.detected = false;
+        aiAnalysis.impersonation.targetBrand = 'None';
+        aiAnalysis.impersonation.explanation = 'Verified trusted domain.';
+        aiAnalysis.overall_verdict = 'SAFE';
+        aiAnalysis.ai_risk_score = 0;
+      }
     } else if (isFinalTrusted && score > 0 && !threatFeed && !typosquat.isSpoof) {
       // Landing page is trusted but origin had some flags (e.g., redirector service)
       score = Math.min(score, 15); // Cap at low suspicious

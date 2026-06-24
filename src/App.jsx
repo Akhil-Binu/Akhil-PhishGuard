@@ -307,6 +307,9 @@ function runOfflineHeuristic(input, mode) {
     if (isClientTrusted(hostname)) {
       score = 0;
       indicators.length = 0;
+      aiUrgency = 0;
+      aiImpersonation = false;
+      targetBrand = 'None';
     }
 
     score = Math.min(score, 100);
@@ -458,7 +461,7 @@ function runOfflineHeuristic(input, mode) {
     if (bodyLower.includes('netflix')) {
       aiImpersonation = true;
       targetBrand = 'Netflix';
-    } else if (bodyLower.includes('chase')) {
+    } else if (bodyLower.includes('chase bank') || bodyLower.includes('chase online')) {
       aiImpersonation = true;
       targetBrand = 'Chase';
     }
